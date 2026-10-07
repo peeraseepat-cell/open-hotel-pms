@@ -4,6 +4,7 @@ import { listOverlappingPlannedRoomHolds, syncReservationNightDependencyMetadata
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 import { getRoomIdsBlockedForStay, ROOM_UNSELLABLE_BLOCK_TYPES } from "@/lib/room-block-availability";
 import { listNights } from "@/lib/dates";
+import { loadRoomStayNights } from "@/lib/room-stay-nights";
 
 function parseDateString(value: unknown): string | null {
     if (typeof value !== "string") return null;
@@ -100,12 +101,11 @@ export async function POST(request: Request) {
         const hkMap: Record<string, string> = {};
         for (const t of hkTasks ?? []) hkMap[t.room_id] = t.status;
 
-        // Fetch stay history totals
-        const { data: stayHistory } = await supabase
-            .from("room_stay_history")
-            .select("room_id");
-        const nightsMap: Record<string, number> = {};
-        for (const s of stayHistory ?? []) nightsMap[s.room_id] = (nightsMap[s.room_id] || 0) + 1;
+        // Fetch stay history totals. Paged: room_stay_history is row-per-room-per-night and
+        // exceeds the 1000-row cap in production, so an un-paged read scored rooms off an arbitrary
+        // slice. A failed read now throws (caught below as a 500) instead of silently
+        // reading as "no history" and scoring every room 0 nights.
+        const nightsMap: Record<string, number> = (await loadRoomStayNights(supabase)) ?? {};
 
         // Build candidate rooms
         const candidates: CandidateRoom[] = (allRooms ?? []).map((r: any) => ({

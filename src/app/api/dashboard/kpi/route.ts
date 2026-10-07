@@ -123,7 +123,7 @@ export async function GET(request: NextRequest) {
         .select("id", { count: "exact", head: true })
         .eq("status", "active")
         .eq("is_dayuse", false)
-        .lt("checkin_date", businessDate)
+        .lte("checkin_date", businessDate)
         .is("checked_in_at", null),
       supabase
         .from("housekeeping_tasks")
@@ -262,7 +262,7 @@ export async function GET(request: NextRequest) {
 
     const dayuseSellableRooms = dayuseRoomsRes.count ?? 0;
     const regularSellableRooms = Math.max(0, sellableRooms - dayuseSellableRooms);
-    const occupancyPct = regularSellableRooms > 0 ? round2((inHouse / regularSellableRooms) * 100) : 0;
+    const occupancyPct = regularSellableRooms > 0 ? round2((occupiedNights / regularSellableRooms) * 100) : 0;
     const adr = occupiedNights > 0 ? round2(totalRevenue / occupiedNights) : 0;
     const revpar = regularSellableRooms > 0 ? round2(totalRevenue / regularSellableRooms) : 0;
 

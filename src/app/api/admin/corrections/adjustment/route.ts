@@ -36,6 +36,12 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       );
     }
+    if (parsed.data.direction === "reduce_charge" && !parsed.data.original_payment_id) {
+      return NextResponse.json(
+        { success: false, error: "reduce_charge requires selecting the charge being reduced" },
+        { status: 400 }
+      );
+    }
 
     const result = await postAdjustment(supabase as any, user.id, {
       reservationId: parsed.data.reservation_id,

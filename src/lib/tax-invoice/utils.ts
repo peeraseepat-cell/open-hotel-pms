@@ -267,6 +267,7 @@ export function getLabels(lang: TaxInvoiceLanguage) {
         manager: "Hotel Manager",
         original: "Original",
         copy: "Copy",
+        sheetNo: "แผ่นที่ / Sheet",
         hq: "Head Office",
       }
     : {
@@ -297,6 +298,7 @@ export function getLabels(lang: TaxInvoiceLanguage) {
         manager: "ผู้จัดการโรงแรม",
         original: "ต้นฉบับ / Original",
         copy: "สำเนา / Copy",
+        sheetNo: "แผ่นที่",
         hq: "สำนักงานใหญ่",
       };
 }

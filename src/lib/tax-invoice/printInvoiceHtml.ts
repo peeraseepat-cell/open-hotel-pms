@@ -30,7 +30,38 @@ interface InvoiceRenderData {
   seller: TaxInvoiceSellerSnapshot;
 }
 
-const PAGE_ITEM_UNIT_BUDGET = 10;
+// How much vertical room the item table actually has, and what a row costs.
+//
+// Measured 2026-08-23 by rendering through renderInvoiceA4Html itself — not a
+// hand-assembled DOM — with the real print CSS and the real THSarabunNew faces.
+// An earlier attempt counted "printed lines" and got the capacity wrong by a
+// whole row, because a row is not just its lines: every row also pays a fixed
+// td padding + border cost whether it holds one line or three.
+//
+//     row height = ROW_CHROME_PX + ROW_LINE_PX * lines      (32px, 52px, 72px …)
+//
+// Four one-line rows are 128px and overflow the sheet by 7px. Two two-line rows
+// are 104px and fit with 17px to spare. Both were measured, and both are pinned
+// in src/lib/tax-invoice/page-break.test.ts.
+//
+// What this estimate does NOT know is glyph width: it counts characters, so a
+// run of wide capitals costs the same as the same number of Thai characters.
+// Measured in headless Chrome on 2026-08-23, across 30 fixtures rendered through
+// this file with the real print CSS and the real THSarabunNew faces:
+//
+//   * every realistic description and note passed with 0px of overflow —
+//     long Thai sentences, long English sentences, ALL-CAPS English, mixed
+//     Thai/English, a long URL in a note, twelve items, three room rows
+//   * a single row carrying more than ~150 solid capital "W" characters
+//     overflows its sheet by 12px, and ~200 of them by 32px
+//
+// That residual is not something pagination can fix: such a row does not fit on
+// a sheet even when it is the only row on it. It spills visibly rather than
+// printing underneath the COPY unseen, which is the behaviour this file
+// replaced.
+const SHEET_ITEM_AREA_PX = 121;
+const ROW_CHROME_PX = 12;
+const ROW_LINE_PX = 20;
 
 function addOneDay(isoDate: string | null | undefined): string | null {
   if (!isoDate || !/^\d{4}-\d{2}-\d{2}$/.test(isoDate)) return isoDate ?? null;
@@ -42,11 +73,16 @@ function addOneDay(isoDate: string | null | undefined): string | null {
   return `${yy}-${mm}-${dd}`;
 }
 
-function estimateItemUnits(item: TaxInvoiceLineItem): number {
+function estimateItemLines(item: TaxInvoiceLineItem): number {
+  // `room_number` prints once per sheet in the party block, never inside a row —
+  // itemTable() renders only `description` and the optional `note`.
   const descriptionLines = Math.max(1, Math.ceil(String(item.description || "").length / 40));
   const noteLines = item.note ? Math.max(1, Math.ceil(String(item.note).length / 48)) : 0;
-  const roomTagLines = item.room_number ? 1 : 0;
-  return descriptionLines + noteLines + roomTagLines;
+  return descriptionLines + noteLines;
+}
+
+function estimateItemHeightPx(item: TaxInvoiceLineItem): number {
+  return ROW_CHROME_PX + ROW_LINE_PX * estimateItemLines(item);
 }
 
 function paginateLineItems(items: TaxInvoiceLineItem[]): TaxInvoiceLineItem[][] {
@@ -54,17 +90,21 @@ function paginateLineItems(items: TaxInvoiceLineItem[]): TaxInvoiceLineItem[][] 
 
   const pages: TaxInvoiceLineItem[][] = [];
   let current: TaxInvoiceLineItem[] = [];
-  let usedUnits = 0;
+  let usedPx = 0;
 
   for (const item of items) {
-    const units = estimateItemUnits(item);
-    if (current.length > 0 && usedUnits + units > PAGE_ITEM_UNIT_BUDGET) {
+    const heightPx = estimateItemHeightPx(item);
+
+    // A row taller than the whole item area still has to print. Flushing first
+    // gives it a sheet to itself, and because usedPx then already exceeds the
+    // area, the row after it starts another sheet. Nothing is dropped.
+    if (current.length > 0 && usedPx + heightPx > SHEET_ITEM_AREA_PX) {
       pages.push(current);
       current = [];
-      usedUnits = 0;
+      usedPx = 0;
     }
     current.push(item);
-    usedUnits += units;
+    usedPx += heightPx;
   }
 
   if (current.length > 0) {
@@ -351,8 +391,11 @@ function invoiceCopy(
   const remarkHtml = remarkText
     ? esc(remarkText).replace(/\n/g, "<br>")
     : esc(l.ifAny);
+  // ป.86/2542 ข้อ 9(2): one tax invoice made of several sheets, all carrying the
+  // same invoice number, must state the words "แผ่นที่ ..." on each sheet. A bare
+  // "1/2" is not that wording.
   const pageBadge = pageCount > 1
-    ? `<div class="page-badge">${esc(`${pageIndex + 1}/${pageCount}`)}</div>`
+    ? `<div class="page-badge">${esc(`${l.sheetNo} ${pageIndex + 1}/${pageCount}`)}</div>`
     : "";
 
   return `
@@ -610,6 +653,12 @@ export function renderInvoiceA4Html(data: InvoiceRenderData) {
     line-height: 1.2;
     vertical-align: top;
     border-bottom: 0.1mm solid rgba(20, 83, 45, 0.1);
+    /* The columns are already fixed-width (table-layout: fixed), but a long
+       unbroken token still paints outside its cell and lands on top of the
+       qty / price / amount columns. Breaking it keeps the money readable; the
+       extra lines it costs are absorbed by paginateLineItems. */
+    overflow-wrap: anywhere;
+    word-break: break-word;
   }
 
   .item-note {

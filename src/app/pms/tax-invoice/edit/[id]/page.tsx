@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import TaxInvoiceForm from "../../tax-invoice-form";
 import { BuildLineItemsResult, TaxInvoiceLineItem } from "@/lib/tax-invoice/types";
+import { pickEditSeedLineItems } from "@/lib/tax-invoice/edit-seed";
 
 type AuditHistoryRow = {
   id: string;
@@ -220,7 +221,11 @@ export default function TaxInvoiceEditPage() {
       tax_invoice_requested: true,
       guest_profile_id: data.guest_tax_profile_id,
     },
-    line_items: fullBuildData?.line_items ?? data.line_items,
+    line_items: pickEditSeedLineItems({
+      saved: data.line_items,
+      rebuilt: fullBuildData?.line_items,
+      invoiceKind: data.invoice_kind,
+    }),
     available_extra_items: fullBuildData?.available_extra_items ?? [],
     totals: {
       subtotal: data.subtotal,

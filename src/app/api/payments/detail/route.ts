@@ -1,3 +1,5 @@
+import { comparePaymentsChronological, comparePosOrdersChronological } from "../chronological-order";
+import { fetchAllRowsComplete } from "@/lib/complete-fetch";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 import { requireStaffAuth } from "@/lib/server-auth";
 import {
@@ -34,6 +36,13 @@ type ReservationNightRoom = {
   room_number: string | null;
 };
 
+type PosOrderRow = {
+  id: string;
+  order_date: string | null;
+  total: number | null;
+  payment_method: string | null;
+};
+
 function chunkArray<T>(items: T[], size = 200): T[][] {
   const chunks: T[][] = [];
   for (let index = 0; index < items.length; index += size) {
@@ -41,6 +50,12 @@ function chunkArray<T>(items: T[], size = 200): T[][] {
   }
   return chunks;
 }
+
+// Both comparators, and the `compareText` they share, now live in
+// ../chronological-order.ts — one copy for both payments routes instead of the
+// byte-identical duplicate this file and report/route.ts each carried. They moved
+// so the ORDER can be run against fixtures (chronological-order.test.mts); a pin
+// on the `.sort(...)` call cannot see what the comparison computes.
 
 function countTowardsPaymentDailyNet(
   txType: "payment" | "refund" | "deposit",
@@ -106,36 +121,55 @@ export async function GET(request: NextRequest) {
       countedDateAlias,
     } = await resolvePaymentReportBusinessDates(supabase, startDate, endDate);
 
-    let paymentsQuery = supabase
-      .from("folio_payments")
-      .select("id, reservation_id, pos_order_id, paid_date, paid_at, method, tx_type, amount, note, revenue_category, cashier_name, is_record_only, is_correction, is_void_reversal, void_of")
-      .in("paid_date", scopedDates)
-      .order("paid_date", { ascending: true })
-      .order("paid_at", { ascending: true });
+    // Rebuilt per page: a PostgREST builder cannot be re-ranged once awaited.
+    const buildPaymentsQuery = () => {
+      let paymentsQuery = supabase
+        .from("folio_payments")
+        .select(
+          "id, reservation_id, pos_order_id, paid_date, paid_at, method, tx_type, amount, note, revenue_category, cashier_name, is_record_only, is_correction, is_void_reversal, void_of",
+          { count: "exact" }
+        )
+        .in("paid_date", scopedDates);
 
-    if (parsed.data.reservation_id) {
-      paymentsQuery = paymentsQuery.eq("reservation_id", parsed.data.reservation_id);
+      if (parsed.data.reservation_id) {
+        paymentsQuery = paymentsQuery.eq("reservation_id", parsed.data.reservation_id);
+      }
+      return paymentsQuery;
+    };
+
+    // Unbounded over a free-form date range: PostgREST's 1000-row cap truncated
+    // both reads silently, and the detail rows were built from the remainder.
+    let paymentRows: PaymentReportRow[];
+    let posOrderRows: PosOrderRow[];
+    try {
+      [paymentRows, posOrderRows] = await Promise.all([
+        fetchAllRowsComplete<PaymentReportRow>(buildPaymentsQuery, { label: "folio payments" }),
+        fetchAllRowsComplete<PosOrderRow>(
+          () =>
+            supabase
+              .from("pos_orders")
+              .select("id, order_date, total, payment_method", { count: "exact" })
+              .eq("status", "completed")
+              .eq("order_type", "walkin")
+              .in("order_date", scopedDates),
+          { label: "POS walk-in orders" }
+        ),
+      ]);
+    } catch (error) {
+      return NextResponse.json(
+        { success: false, error: error instanceof Error ? error.message : String(error) },
+        { status: 500 }
+      );
     }
 
-    const [paymentsRes, posOrdersRes] = await Promise.all([
-      paymentsQuery,
-      supabase
-        .from("pos_orders")
-        .select("id, order_date, total, payment_method")
-        .eq("status", "completed")
-        .eq("order_type", "walkin")
-        .in("order_date", scopedDates)
-        .order("order_date", { ascending: true }),
-    ]);
+    // The pager orders by its keyset cursor (`id`), so the chronological order
+    // these reads used to carry in SQL is restored here. This route DOES emit a
+    // row list, and while the groups and their entries are explicitly re-sorted
+    // further down, those sorts are not proven total — where they tie, insertion
+    // order decides, and insertion order is this order.
+    paymentRows.sort(comparePaymentsChronological);
+    posOrderRows.sort(comparePosOrdersChronological);
 
-    if (paymentsRes.error) {
-      return NextResponse.json({ success: false, error: paymentsRes.error.message }, { status: 500 });
-    }
-    if (posOrdersRes.error) {
-      return NextResponse.json({ success: false, error: posOrdersRes.error.message }, { status: 500 });
-    }
-
-    const paymentRows = (paymentsRes.data ?? []) as PaymentReportRow[];
     const scopedPaymentIds = paymentRows
       .map((row) => String(row.id ?? "").trim())
       .filter(Boolean);
@@ -188,24 +222,46 @@ export async function GET(request: NextRequest) {
 
     if (reservationIds.length > 0) {
       for (const chunk of chunkArray(reservationIds)) {
-        const [reservationsRes, nightsRes] = await Promise.all([
+        // The reservations read is bounded — a 200-id `.in("id", ...)` returns at
+        // most 200 rows. The nights read is NOT: it fans out to one row per
+        // stay night per reservation, so ~200 reservations across a long stay
+        // range crosses 1000 rows per chunk and PostgREST truncates it silently.
+        // Chunking bounds the ARGUMENT, not the result.
+        const [reservationsRes, nightsResult] = await Promise.all([
           supabase
             .from("reservations")
             .select("id, booking_code, guest_name, guest_profile_id, checkin_date, source, parent_reservation_id, deposit_note")
             .in("id", chunk),
-          supabase
-            .from("reservation_nights")
-            .select("reservation_id, stay_date, rooms:room_id(room_number)")
-            .in("reservation_id", chunk)
-            .lte("stay_date", endDate)
-            .is("cancelled_at", null),
+          fetchAllRowsComplete<Record<string, unknown>>(
+            () =>
+              supabase
+                .from("reservation_nights")
+                // `id` added for the keyset cursor: the pager reads it out of
+                // every row and refuses when it is absent. No JS re-sort follows
+                // this one, and that is deliberate — the read was already ordered
+                // by `id`, so the pager's cursor order IS its previous order.
+                // (Note for whoever owns the stay display: ordering nights by a
+                // random uuid was never chronological. Pre-existing, not this
+                // sweep's to change.)
+                .select("id, reservation_id, stay_date, rooms:room_id(room_number)", { count: "exact" })
+                .in("reservation_id", chunk)
+                .lte("stay_date", endDate)
+                .is("cancelled_at", null),
+            { label: "reservation nights" }
+          ).then(
+            (rows) => ({ rows, error: null as { message: string } | null }),
+            (error: unknown) => ({
+              rows: [] as Record<string, unknown>[],
+              error: { message: error instanceof Error ? error.message : String(error) },
+            })
+          ),
         ]);
 
         if (reservationsRes.error) {
           return NextResponse.json({ success: false, error: reservationsRes.error.message }, { status: 500 });
         }
-        if (nightsRes.error) {
-          return NextResponse.json({ success: false, error: nightsRes.error.message }, { status: 500 });
+        if (nightsResult.error) {
+          return NextResponse.json({ success: false, error: nightsResult.error.message }, { status: 500 });
         }
 
         for (const row of reservationsRes.data ?? []) {
@@ -220,7 +276,7 @@ export async function GET(request: NextRequest) {
           });
         }
 
-        for (const row of (nightsRes.data ?? []) as any[]) {
+        for (const row of nightsResult.rows as any[]) {
           const reservationId = String(row.reservation_id ?? "");
           if (!reservationId) continue;
           const roomRef = Array.isArray(row.rooms) ? row.rooms[0] : row.rooms;
@@ -371,7 +427,7 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    for (const posOrder of (posOrdersRes.data ?? []) as Array<{ id: string; order_date: string | null; total: number | null; payment_method: string | null }>) {
+    for (const posOrder of posOrderRows) {
       const paidDate = String(posOrder.order_date ?? startDate);
       const countedPaidDate = countedDateAlias.get(paidDate) ?? paidDate;
       const amount = Number(posOrder.total ?? 0);

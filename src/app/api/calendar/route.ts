@@ -74,10 +74,16 @@ export async function GET(request: NextRequest) {
                 .in("reservations.status", ["active", "checked_out", "draft_checkin"]),
 
             // Fetch Room Blocks
+            // Inclusive AND-overlap, matching the client predicate in
+            // src/app/pms/calendar/page.tsx (`!(end_date < startDate || start_date > endDate)`).
+            // The previous `.or(...)` was a tautology — a row escaped it only when
+            // end_date < start_date — so the server shipped the whole table and lost
+            // arbitrary blocks past the 1000-row cap.
             supabase
                 .from("room_blocks")
                 .select("*")
-                .or(`start_date.lte.${endDate},end_date.gte.${startDate}`),
+                .lte("start_date", endDate)
+                .gte("end_date", startDate),
 
             // Planned moves
             supabase

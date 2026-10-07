@@ -290,7 +290,7 @@ async function fallbackCreateTransfer(
       (driverCom ?? 0)
     ).toFixed(2)
   );
-  const margin = selling !== null && cost !== null ? Number(((selling ?? 0) - (cost ?? 0)).toFixed(2)) : null;
+  const margin = selling !== null ? (cost === null ? 0 : Number((selling - cost).toFixed(2))) : null;
 
   const { data: transfer, error: transferError } = await supabase
     .from("transfers")

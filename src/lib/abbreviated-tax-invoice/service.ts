@@ -21,6 +21,7 @@ import {
 import {
   assignSequentialInvoiceNumbers,
   computeAbbreviatedInvoiceNo,
+  planAbbreviatedInvoiceRenumbering,
 } from "@/lib/abbreviated-tax-invoice/numbering";
 import {
   mapCompletedPositivePosItemRows,
@@ -31,7 +32,8 @@ import {
   applyCoveredRoomRevenueToNights,
   completeChargedReservationNightsFromAuditTotal,
 } from "@/lib/abbreviated-tax-invoice/night-allocation";
-import { getSellerSnapshotFromSettings } from "@/lib/tax-invoice/service";
+import { extractReservationIdsFromBookingSnapshot, getSellerSnapshotFromSettings } from "@/lib/tax-invoice/service";
+import { fetchAllRowsComplete } from "@/lib/complete-fetch";
 import { normalizeMoney, round2 } from "@/lib/tax-invoice/utils";
 import type { BookingSource } from "@/lib/types";
 import { loadIssuedFullTaxCoverageMap } from "@/lib/monthly-audit";
@@ -151,8 +153,6 @@ export class AbbreviatedTaxInvoiceError extends Error {
     this.status = status;
   }
 }
-
-const RESERVATION_NIGHT_PAGE_SIZE = 1000;
 
 function monthDateRange(year: number, month: number): { from: string; to: string } {
   const from = `${year}-${String(month).padStart(2, "0")}-01`;
@@ -304,13 +304,27 @@ async function ensureAuditPeriodExists(
 }
 
 async function loadAuditEntries(supabase: SupabaseLike, periodId: string): Promise<AuditEntryRow[]> {
-  const { data, error } = await supabase
-    .from("monthly_audit_entries")
-    .select("id, period_id, reservation_id, source, guest_name, checkin_date, checkout_date, room_revenue, extra_revenue, total_revenue, refund_total, outstanding")
-    .eq("period_id", periodId)
-    .limit(5000);
-
-  if (error) throw new AbbreviatedTaxInvoiceError(error.message, 500);
+  // Every audit entry for the period feeds the abbreviated tax invoice build, so
+  // a truncated read silently under-reports the month's tax.
+  let data: any[];
+  try {
+    data = await fetchAllRowsComplete<any>(
+      () =>
+        supabase
+          .from("monthly_audit_entries")
+          .select(
+            "id, period_id, reservation_id, source, guest_name, checkin_date, checkout_date, room_revenue, extra_revenue, total_revenue, refund_total, outstanding",
+            { count: "exact" }
+          )
+          .eq("period_id", periodId),
+      { label: "monthly audit entries" }
+    );
+  } catch (error) {
+    throw new AbbreviatedTaxInvoiceError(
+      error instanceof Error ? error.message : String(error),
+      500
+    );
+  }
 
   return ((data ?? []) as any[]).map((row) => ({
     id: String(row.id),
@@ -347,17 +361,28 @@ async function loadReservations(
     for (const row of (data ?? []) as any[]) byId.set(String(row.id), shapeReservation(row));
   }
 
-  const { data: overlapping, error: overlapError } = await supabase
-    .from("reservations")
-    .select("id, booking_code, guest_name, source, status, checkin_date, checkout_date, is_dayuse")
-    .lte("checkin_date", dateTo)
-    .gt("checkout_date", dateFrom)
-    .neq("status", "cancelled")
-    .neq("status", "no_show")
-    .limit(5000);
-
-  if (overlapError) throw new AbbreviatedTaxInvoiceError(overlapError.message, 500);
-  for (const row of (overlapping ?? []) as any[]) byId.set(String(row.id), shapeReservation(row));
+  let overlapping: any[];
+  try {
+    overlapping = await fetchAllRowsComplete<any>(
+      () =>
+        supabase
+          .from("reservations")
+          .select("id, booking_code, guest_name, source, status, checkin_date, checkout_date, is_dayuse", {
+            count: "exact",
+          })
+          .lte("checkin_date", dateTo)
+          .gt("checkout_date", dateFrom)
+          .neq("status", "cancelled")
+          .neq("status", "no_show"),
+      { label: "overlapping reservations" }
+    );
+  } catch (error) {
+    throw new AbbreviatedTaxInvoiceError(
+      error instanceof Error ? error.message : String(error),
+      500
+    );
+  }
+  for (const row of overlapping) byId.set(String(row.id), shapeReservation(row));
 
   return Array.from(byId.values()).sort((a, b) => a.checkout_date.localeCompare(b.checkout_date));
 }
@@ -381,20 +406,35 @@ async function loadNights(
 ): Promise<NightRow[]> {
   if (reservationIds.length === 0) return [];
 
-  const rows: any[] = [];
-  for (let offset = 0; ; offset += RESERVATION_NIGHT_PAGE_SIZE) {
-    const { data, error } = await supabase
-      .from("reservation_nights")
-      .select("id, reservation_id, room_id, stay_date, nightly_price, cancelled_at, rooms(id, room_type_id, room_types(code, name_en))")
-      .in("reservation_id", reservationIds)
-      .order("stay_date", { ascending: true })
-      .range(offset, offset + RESERVATION_NIGHT_PAGE_SIZE - 1);
-
-    if (error) throw new AbbreviatedTaxInvoiceError(error.message, 500);
-
-    const page = (data ?? []) as any[];
-    rows.push(...page);
-    if (page.length < RESERVATION_NIGHT_PAGE_SIZE) break;
+  // Keyset by `id`, not offset. This used to page by offset under
+  // `.order("stay_date")`, which LOOKS safe and is not: stay_date is NOT unique on
+  // reservation_nights — its only unique indexes are the (room, day) composites —
+  // so it is not a total order. Nights tying on a stay_date could be returned in
+  // any order between pages, duplicating and skipping across the boundary exactly
+  // as an unordered pager does. A non-total ORDER BY does not make offset paging
+  // safe; it only makes the defect harder to see, which is why this one outlived
+  // the read that had no order at all.
+  //
+  // Dropping the stay_date order costs nothing downstream: every consumer re-sorts
+  // by stay_date itself (buildRoomPreview and night-allocation both do).
+  let rows: any[];
+  try {
+    rows = await fetchAllRowsComplete<any>(
+      () =>
+        supabase
+          .from("reservation_nights")
+          .select(
+            "id, reservation_id, room_id, stay_date, nightly_price, cancelled_at, rooms(id, room_type_id, room_types(code, name_en))",
+            { count: "exact" }
+          )
+          .in("reservation_id", reservationIds),
+      { label: "invoice nights" }
+    );
+  } catch (error) {
+    throw new AbbreviatedTaxInvoiceError(
+      error instanceof Error ? error.message : String(error),
+      500
+    );
   }
 
   return rows.map((row) => {
@@ -502,24 +542,27 @@ async function loadIssuedFullTaxReservationIds(
   const map = new Map<string, string>();
   if (reservationIds.length === 0) return map;
 
-  const { data, error } = await supabase
-    .from("invoices")
-    .select("id, reservation_id, booking_snapshot")
-    .eq("status", "issued")
-    .is("cancelled_at", null)
-    .limit(5000);
-
-  if (error) throw new AbbreviatedTaxInvoiceError(error.message, 500);
+  let rows: any[];
+  try {
+    rows = await fetchAllRowsComplete<any>(
+      () =>
+        supabase
+          .from("invoices")
+          .select("id, reservation_id, booking_snapshot", { count: "exact" })
+          .eq("status", "issued")
+          .is("cancelled_at", null),
+      { label: "issued full tax invoices" }
+    );
+  } catch (error) {
+    throw new AbbreviatedTaxInvoiceError(
+      error instanceof Error ? error.message : String(error),
+      500
+    );
+  }
 
   const wanted = new Set(reservationIds);
-  for (const row of (data ?? []) as any[]) {
-    const ids = new Set<string>([String(row.reservation_id)]);
-    const snapshot = row.booking_snapshot && typeof row.booking_snapshot === "object"
-      ? row.booking_snapshot as Record<string, unknown>
-      : null;
-    if (Array.isArray(snapshot?.reservation_ids)) {
-      for (const value of snapshot.reservation_ids) ids.add(String(value));
-    }
+  for (const row of rows) {
+    const ids = extractReservationIdsFromBookingSnapshot(row.booking_snapshot, row.reservation_id);
     for (const reservationId of ids) {
       if (wanted.has(reservationId)) map.set(reservationId, String(row.id));
     }
@@ -1388,59 +1431,41 @@ async function refreshPersistedAbbreviatedInvoice(
   }
 }
 
-function abbreviatedDraftKey(draft: AbbreviatedInvoiceDraft) {
-  if (draft.source_type === "room") {
-    return `${draft.source_type}::${draft.issue_date}::${draft.channel_group ?? ""}`;
-  }
-  if (draft.source_type === "dayuse") {
-    return `${draft.source_type}::period`;
-  }
-  return `${draft.source_type}::${draft.issue_date}`;
-}
-
-function abbreviatedInvoiceKey(row: any) {
-  const sourceType = String(row.source_type ?? "room");
-  if (sourceType === "room") {
-    return `${sourceType}::${String(row.issue_date)}::${String(row.channel_group ?? "")}`;
-  }
-  if (sourceType === "dayuse") {
-    return `${sourceType}::period`;
-  }
-  return `${sourceType}::${String(row.issue_date)}`;
-}
-
-async function cancelStaleAbbreviatedInvoices(
+async function preparePersistedAbbreviatedInvoiceNumbers(
   supabase: SupabaseLike,
   periodId: string,
   sourceType: AbbreviatedSourceType,
   preview: AbbreviatedPreviewResponse
 ): Promise<string[]> {
-  const activeDraftKeys = new Set(preview.drafts.map(abbreviatedDraftKey));
   const { data: existingRows, error: existingError } = await supabase
     .from("abbreviated_tax_invoice")
-    .select("id, invoice_no, issue_date, source_type, channel_group")
+    .select("id, issue_date, source_type, channel_group")
     .eq("audit_period_id", periodId)
     .eq("source_type", sourceType)
     .neq("status", "cancelled");
   if (existingError) throw new AbbreviatedTaxInvoiceError(existingError.message, 500);
 
-  const staleIds = ((existingRows ?? []) as any[])
-    .filter((row) => !activeDraftKeys.has(abbreviatedInvoiceKey(row)))
-    .map((row) => String(row.id));
+  const plan = planAbbreviatedInvoiceRenumbering(
+    ((existingRows ?? []) as any[]).map((row) => ({
+      id: String(row.id),
+      source_type: row.source_type as AbbreviatedSourceType,
+      issue_date: String(row.issue_date),
+      channel_group: (row.channel_group ?? null) as ChannelGroup | null,
+    })),
+    preview.drafts
+  );
 
-  if (staleIds.length === 0) return [];
+  if (plan.assignments.length === 0 && plan.stale_ids.length === 0) return [];
 
-  const { error: cancelError } = await supabase
-    .from("abbreviated_tax_invoice")
-    .update({
-      status: "cancelled",
-      cancelled_reason: "regenerated_without_draft",
-      cancelled_at: new Date().toISOString(),
-    })
-    .in("id", staleIds);
-  if (cancelError) throw new AbbreviatedTaxInvoiceError(cancelError.message, 500);
+  const { error: renumberError } = await supabase.rpc("renumber_abbreviated_invoices", {
+    p_audit_period_id: periodId,
+    p_source_type: sourceType,
+    p_assignments: plan.assignments,
+    p_stale_ids: plan.stale_ids,
+  });
+  if (renumberError) throw new AbbreviatedTaxInvoiceError(renumberError.message, 500);
 
-  return staleIds;
+  return plan.stale_ids;
 }
 
 export async function generateAbbreviatedInvoices(
@@ -1465,6 +1490,14 @@ export async function generateAbbreviatedInvoices(
   let createdCount = 0;
   let updatedCount = 0;
   let cancelledCount = 0;
+
+  const cancelledInvoiceIds = await preparePersistedAbbreviatedInvoiceNumbers(
+    supabase,
+    period.id,
+    sourceType,
+    preview
+  );
+  cancelledCount = cancelledInvoiceIds.length;
 
   for (const draft of preview.drafts) {
     let existingQuery = supabase
@@ -1534,8 +1567,6 @@ export async function generateAbbreviatedInvoices(
     invoiceIds.push(invoiceId);
   }
 
-  const cancelledInvoiceIds = await cancelStaleAbbreviatedInvoices(supabase, period.id, sourceType, preview);
-  cancelledCount = cancelledInvoiceIds.length;
   if (cancelledCount > 0) warnings.push(`Cancelled ${cancelledCount} stale invoice(s) without current draft.`);
 
   return {
@@ -1570,6 +1601,13 @@ export async function recalculateAbbreviated(
   const seller = await getSellerSnapshotFromSettings(supabase as any);
   const changedInvoiceIds: string[] = [];
 
+  const cancelledInvoiceIds = await preparePersistedAbbreviatedInvoiceNumbers(
+    supabase,
+    String((period as any).id),
+    sourceType,
+    preview
+  );
+
   for (const draft of preview.drafts) {
     let existingQuery = supabase
       .from("abbreviated_tax_invoice")
@@ -1598,8 +1636,6 @@ export async function recalculateAbbreviated(
 
     changedInvoiceIds.push(invoiceId);
   }
-
-  const cancelledInvoiceIds = await cancelStaleAbbreviatedInvoices(supabase, String((period as any).id), sourceType, preview);
 
   const { data: existingRows, error: existingError } = await supabase
     .from("abbreviated_tax_invoice")

@@ -169,7 +169,7 @@ export async function GET(request: NextRequest) {
       .from("room_blocks")
       .select("room_id, block_type, reason")
       .lte("start_date", date)
-      .gte("end_date", date),
+      .gt("end_date", date),
   ]);
 
   const tW1End = performance.now();

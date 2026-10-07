@@ -17,7 +17,7 @@ export function toSatang(value: unknown): number {
   if (!Number.isFinite(n)) return 0;
   const sign = n < 0 ? -1 : 1;
   const abs = Math.abs(n);
-  return sign * Math.trunc(abs * 100);
+  return sign * Math.round(abs * 100);
 }
 
 export function fromSatang(satang: number): number {

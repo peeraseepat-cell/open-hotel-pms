@@ -1,3 +1,5 @@
+import { compareInvoiceListNewestFirst } from "./list-order";
+import { fetchAllRowsComplete } from "@/lib/complete-fetch";
 import { getAuthenticatedUser } from "@/lib/server-auth";
 import { getUserRole } from "@/lib/server-auth";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
@@ -235,28 +237,48 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    let invoiceQuery = supabase
-      .from("invoices")
-      .select("id, invoice_no, cancelled_invoice_no, reservation_id, status, issue_date, language, customer_name, customer_tax_id, grand_total, invoice_kind, split_group_id, coverage_amount, coverage_note, manual_issue_date_reason, update_reason, created_at, updated_at, booking_snapshot")
-      .gte("issue_date", dateFrom)
-      .lte("issue_date", dateTo)
-      .order("issue_date", { ascending: false })
-      .order("created_at", { ascending: false })
-      .limit(5000);
+    // Rebuilt per page: a PostgREST builder cannot be re-ranged once awaited.
+    const buildInvoiceQuery = () => {
+      let invoiceQuery = supabase
+        .from("invoices")
+        .select("id, invoice_no, cancelled_invoice_no, reservation_id, status, issue_date, language, customer_name, customer_tax_id, grand_total, invoice_kind, split_group_id, coverage_amount, coverage_note, manual_issue_date_reason, update_reason, created_at, updated_at, booking_snapshot", { count: "exact" })
+        .gte("issue_date", dateFrom)
+        .lte("issue_date", dateTo);
 
-    if (queryInput.status) {
-      invoiceQuery = invoiceQuery.eq("status", queryInput.status);
-    }
-    if (!viewerIsAdmin || !queryInput.include_cancelled) {
-      invoiceQuery = invoiceQuery.neq("status", "cancelled");
+      if (queryInput.status) {
+        invoiceQuery = invoiceQuery.eq("status", queryInput.status);
+      }
+      if (!viewerIsAdmin || !queryInput.include_cancelled) {
+        invoiceQuery = invoiceQuery.neq("status", "cancelled");
+      }
+      return invoiceQuery;
+    };
+
+    let invoiceRowsRaw: any[] = [];
+    try {
+      invoiceRowsRaw = await fetchAllRowsComplete<any>(buildInvoiceQuery, { label: "invoices" });
+    } catch (error) {
+      const raw = ((error as { cause?: { message?: string | null; code?: string | null } }).cause ?? {
+        message: error instanceof Error ? error.message : String(error),
+      }) as { message?: string | null; code?: string | null };
+      if (!isMissingRelationError(raw, "invoices")) {
+        return NextResponse.json(
+          { success: false, error: raw.message ?? "Failed to load invoices." },
+          { status: 500 }
+        );
+      }
     }
 
-    const { data: invoiceRowsRaw, error: invoiceError } = await invoiceQuery;
-    if (invoiceError && !isMissingRelationError(invoiceError, "invoices")) {
-      return NextResponse.json({ success: false, error: invoiceError.message }, { status: 500 });
-    }
-
-    const invoiceRows = (invoiceRowsRaw ?? []) as InvoiceRow[];
+    // The pager orders by its keyset cursor (`id`), so the list order this
+    // endpoint has always returned is restored here. This one IS the response
+    // order — `listRows` is built by mapping `invoiceRows` straight through — so
+    // dropping it would silently reorder the invoice list in the UI.
+    // The comparator lives in ./list-order.ts so the ORDER is testable against
+    // fixtures (list-order.test.mts). As an inline arrow the only thing a contract
+    // test could assert was that both sides of each key appeared in its body, which
+    // Review mutants walked straight through: flipping issue_date left the full
+    // suite green.
+    const invoiceRows = ((invoiceRowsRaw ?? []) as InvoiceRow[]).sort(compareInvoiceListNewestFirst);
     const reservationIds = Array.from(new Set(invoiceRows.map((row) => String(row.reservation_id))))
       .filter(Boolean);
 
@@ -345,25 +367,49 @@ export async function GET(request: NextRequest) {
 
     let pendingReservations: Array<Record<string, unknown>> = [];
     if (queryInput.include_pending) {
-      const { data: pendingRows, error: pendingError } = await supabase
-        .from("reservations")
-        .select("id, booking_code, guest_name, source, status, checkin_date, checkout_date, tax_invoice_requested, total_price, booking_group_id")
-        .eq("tax_invoice_requested", true)
-        .neq("status", "cancelled")
-        .order("checkout_date", { ascending: true })
-        .limit(5000);
-
-      if (pendingError) {
-        return NextResponse.json({ success: false, error: pendingError.message }, { status: 500 });
+      let pendingRows: any[];
+      try {
+        pendingRows = await fetchAllRowsComplete<any>(
+          () =>
+            supabase
+              .from("reservations")
+              .select(
+                "id, booking_code, guest_name, source, status, checkin_date, checkout_date, tax_invoice_requested, total_price, booking_group_id",
+                { count: "exact" }
+              )
+              .eq("tax_invoice_requested", true)
+              .neq("status", "cancelled"),
+          { label: "pending tax-invoice reservations" }
+        );
+      } catch (error) {
+        return NextResponse.json(
+          { success: false, error: error instanceof Error ? error.message : String(error) },
+          { status: 500 }
+        );
       }
 
-      const { data: issuedRows, error: issuedError } = await supabase
-        .from("invoices")
-        .select("reservation_id, booking_snapshot, invoice_kind")
-        .eq("status", "issued");
-
-      if (issuedError && !isMissingRelationError(issuedError, "invoices")) {
-        return NextResponse.json({ success: false, error: issuedError.message }, { status: 500 });
+      // A missing `invoices` relation stays tolerated, as before — but a
+      // truncated or failed read must not silently widen the pending list.
+      let issuedRows: any[] = [];
+      try {
+        issuedRows = await fetchAllRowsComplete<any>(
+          () =>
+            supabase
+              .from("invoices")
+              .select("id, reservation_id, booking_snapshot, invoice_kind", { count: "exact" })
+              .eq("status", "issued"),
+          { label: "issued invoices" }
+        );
+      } catch (error) {
+        const raw = ((error as { cause?: { message?: string | null; code?: string | null } }).cause ?? {
+          message: error instanceof Error ? error.message : String(error),
+        }) as { message?: string | null; code?: string | null };
+        if (!isMissingRelationError(raw, "invoices")) {
+          return NextResponse.json(
+            { success: false, error: raw.message ?? "Failed to load issued invoices." },
+            { status: 500 }
+          );
+        }
       }
 
       const fullyCoveredSet = new Set(
@@ -552,14 +598,24 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { data: existingRows, error: existingRowsError } = await supabase
-      .from("invoices")
-      .select("id, invoice_no, reservation_id, status, booking_snapshot, invoice_kind, split_group_id, coverage_amount, grand_total")
-      .neq("status", "cancelled")
-      .limit(5000);
-
-    if (existingRowsError) {
-      return NextResponse.json({ success: false, error: existingRowsError.message }, { status: 500 });
+    let existingRows: any[];
+    try {
+      existingRows = await fetchAllRowsComplete<any>(
+        () =>
+          supabase
+            .from("invoices")
+            .select(
+              "id, invoice_no, reservation_id, status, booking_snapshot, invoice_kind, split_group_id, coverage_amount, grand_total",
+              { count: "exact" }
+            )
+            .neq("status", "cancelled"),
+        { label: "existing invoices" }
+      );
+    } catch (error) {
+      return NextResponse.json(
+        { success: false, error: error instanceof Error ? error.message : String(error) },
+        { status: 500 }
+      );
     }
 
     const overlappingExistingRows = ((existingRows ?? []) as Array<Record<string, unknown>>)

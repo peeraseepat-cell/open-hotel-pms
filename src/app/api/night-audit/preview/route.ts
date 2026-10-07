@@ -180,8 +180,7 @@ export async function GET() {
       .select("id, after_json")
       .eq("action", "no_show")
       .eq("entity_type", "reservation")
-      .gte("created_at", from)
-      .lt("created_at", to);
+      .eq("business_date", businessDate);
     if (noShowLogsRes.error) return NextResponse.json({ success: false, error: noShowLogsRes.error.message }, { status: 500 });
     const noShowCount = noShowLogsRes.data?.length ?? 0;
     const noShowFeeTotal = (noShowLogsRes.data ?? []).reduce((sum, row: any) => {

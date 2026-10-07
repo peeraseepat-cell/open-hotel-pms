@@ -6412,7 +6412,7 @@ export default function ReservationDetailPage({
                                             <BillingPanel
                                                 reservationId={reservationId}
                                                 guestName={guestName}
-                                                totalPrice={mode === "checkout" || dayUseAmountOnlyMode ? totalPrice : fromSatang(computedTotalSatang)}
+                                                totalPrice={mode === "checkout" || dayUseAmountOnlyMode || isCheckedOutReservation ? totalPrice : fromSatang(computedTotalSatang)}
                                                 discountAmount={fromSatang(discountSatang)}
                                                 discountReason={discountReason}
                                                 depositNote={depositGeneralNote}

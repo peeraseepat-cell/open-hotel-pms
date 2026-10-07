@@ -1,3 +1,4 @@
+import { fetchAllRowsComplete } from "@/lib/complete-fetch";
 import { getAuthenticatedUser } from "@/lib/server-auth";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 import {
@@ -144,14 +145,24 @@ export async function POST(
       );
     }
 
-    const { data: existingIssuedRows, error: existingIssuedError } = await supabase
-      .from("invoices")
-      .select("id, invoice_no, reservation_id, booking_snapshot, invoice_kind, split_group_id, coverage_amount, grand_total")
-      .eq("status", "issued")
-      .limit(5000);
-
-    if (existingIssuedError) {
-      return NextResponse.json({ success: false, error: existingIssuedError.message }, { status: 500 });
+    let existingIssuedRows: any[];
+    try {
+      existingIssuedRows = await fetchAllRowsComplete<any>(
+        () =>
+          supabase
+            .from("invoices")
+            .select(
+              "id, invoice_no, reservation_id, booking_snapshot, invoice_kind, split_group_id, coverage_amount, grand_total",
+              { count: "exact" }
+            )
+            .eq("status", "issued"),
+        { label: "issued invoices" }
+      );
+    } catch (error) {
+      return NextResponse.json(
+        { success: false, error: error instanceof Error ? error.message : String(error) },
+        { status: 500 }
+      );
     }
 
     const overlappingIssuedRows = ((existingIssuedRows ?? []) as Array<Record<string, unknown>>)
