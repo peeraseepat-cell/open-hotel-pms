@@ -17,6 +17,20 @@ type ExistingProfileCandidate = {
   profile_status?: string | null;
 };
 
+function companionSlot(guest: any, index: number): number {
+  const slot = Number(guest?.passport_guest_index);
+  return Number.isInteger(slot) && slot >= 1 && slot <= 3 ? slot : index + 1;
+}
+
+function normalizeCompanions(guests: any[]): any[] {
+  return guests.map((guest, index) => ({ ...guest, passport_guest_index: companionSlot(guest, index) }));
+}
+
+function hasGuestData(guest: any, scanId?: string | null): boolean {
+  return Boolean(scanId || guest?.passport_scan_id) ||
+    ["full_name", "passport_no", "nationality", "date_of_birth", "gender"].some(key => String(guest?.[key] ?? "").trim());
+}
+
 function normalizePassportNo(value: unknown): string {
   return String(value ?? "")
     .toUpperCase()
@@ -64,7 +78,11 @@ export default function GuestInfo() {
   const lookupRequestRef = useRef(0);
   const mainCameraRef = useRef<HTMLInputElement>(null);
   const accCameraRef = useRef<HTMLInputElement>(null);
+  const accScanSlotRef = useRef<number | null>(null);
   const [originalBookingName, setOriginalBookingName] = useState("");
+  const [overwriteTarget, setOverwriteTarget] = useState<number | null>(null);
+  const [removeTarget, setRemoveTarget] = useState<number | null>(null);
+  const [savedNotice, setSavedNotice] = useState<string | null>(null);
 
   // Hydrate OCR data & Load Session & Fetch Original Name
   useEffect(() => {
@@ -98,6 +116,7 @@ export default function GuestInfo() {
       const saved = sessionStorage.getItem(`mobile-checkin-${resId}`);
       if (saved) {
         const parsed = JSON.parse(saved);
+        setMainScanId(scanId || (parsed.scan_id ? String(parsed.scan_id) : null));
         if (parsed.guest_info) {
           setMainGuest(parsed.guest_info);
         } else if (_originalName) {
@@ -106,8 +125,8 @@ export default function GuestInfo() {
         if (parsed.selected_profile_id) {
           setSelectedProfileId(String(parsed.selected_profile_id));
         }
-        if (parsed.accompanying_guests) setAccompanying(parsed.accompanying_guests);
-        else if (parsed.accompanying) setAccompanying(parsed.accompanying);
+        if (parsed.accompanying_guests) setAccompanying(normalizeCompanions(parsed.accompanying_guests));
+        else if (parsed.accompanying) setAccompanying(normalizeCompanions(parsed.accompanying));
         return;
       }
 
@@ -198,12 +217,14 @@ export default function GuestInfo() {
 
   const addAccompanying = () => {
     if (accompanying.length >= 3) return;
-    setAccompanying([...accompanying, { full_name: "", passport_no: "", nationality: "", date_of_birth: "", gender: "", source: "manual" }]);
+    const current = normalizeCompanions(accompanying);
+    const slot = [1, 2, 3].find(value => !current.some(guest => guest.passport_guest_index === value));
+    if (slot === undefined) return;
+    setAccompanying([...current, { full_name: "", passport_no: "", nationality: "", date_of_birth: "", gender: "", source: "manual", passport_guest_index: slot, passport_scan_id: null }]);
   };
 
   const removeAccompanying = (index: number) => {
-    if (!confirm("Are you sure you want to delete this accompanying guest?")) return;
-    setAccompanying(accompanying.filter((_, i) => i !== index));
+    setRemoveTarget(index);
   };
 
   const updateAccompanying = (index: number, key: string, value: string) => {
@@ -215,12 +236,15 @@ export default function GuestInfo() {
   const onNext = () => {
     if (!mainGuest.full_name.trim()) return alert("Main Guest Name is required.");
     
-    // Save to session — key must be "accompanying_guests" to match API schema
-    sessionStorage.setItem(`mobile-checkin-${resId}`, JSON.stringify({
+    const sessionKey = `mobile-checkin-${resId}`;
+    let current: Record<string, unknown> = {};
+    try { current = JSON.parse(sessionStorage.getItem(sessionKey) || "{}"); } catch { /* Start a new session if stored JSON is corrupt. */ }
+    sessionStorage.setItem(sessionKey, JSON.stringify({
+      ...current,
       scan_id: mainScanId,
       selected_profile_id: selectedProfileId,
       guest_info: mainGuest,
-      accompanying_guests: accompanying,
+      accompanying_guests: normalizeCompanions(accompanying),
       booking_name_note: bookingNameNote,
     }));
     
@@ -249,6 +273,12 @@ export default function GuestInfo() {
       }
       const scanData = json.data;
 
+      if (scanData.mrz_failed || !scanData.parsed) {
+        setMainScanId(scanData.scan_id);
+        sessionStorage.removeItem("mobile-checkin-temp-ocr");
+        setSavedNotice("Passport photo saved. MRZ could not be read; enter the details manually or scan again.");
+        return;
+      }
       const ocrName = `${scanData.parsed.firstName ?? ""} ${scanData.parsed.familyName ?? ""}`.trim();
       const currentName = mainGuest.full_name.trim() || originalBookingName;
 
@@ -287,34 +317,43 @@ export default function GuestInfo() {
       setAccScanning(null);
       return;
     }
+    const guestSlot = companionSlot(accompanying[idx], idx);
+    accScanSlotRef.current = guestSlot;
     try {
       const mrzBlob = await buildPassportMrzBlob(file);
       const formData = new FormData();
       formData.append("image", mrzBlob, "passport-mrz.jpg");
       formData.append("source", "tight_mrz");
       formData.append("reservation_id", resId);
-      formData.append("guest_index", String(idx + 1));
+      formData.append("guest_index", String(guestSlot));
       const res = await fetch("/api/checkin/scan-passport", { method: "POST", body: formData });
       const json = await res.json().catch(() => null);
+      if (accScanSlotRef.current !== guestSlot) return;
       if (!res.ok || !json?.success) {
         throw new Error(json?.error || "Passport scan failed.");
       }
       const scanData = json.data;
 
+      if (scanData.mrz_failed || !scanData.parsed) {
+        setAccompanying(current => normalizeCompanions(current).map((guest, index) => guest.passport_guest_index === guestSlot ? { ...guest, passport_scan_id: scanData.scan_id } : guest));
+        setSavedNotice("Passport photo saved. MRZ could not be read; enter the details manually or scan again.");
+        return;
+      }
       const parsed = scanData.parsed;
       const ocrName = `${parsed.firstName ?? ""} ${parsed.familyName ?? ""}`.trim();
 
-      const newAcc = [...accompanying];
-      newAcc[idx] = {
-        ...newAcc[idx],
-        full_name: ocrName || newAcc[idx].full_name,
-        passport_no: parsed.passportNumber || newAcc[idx].passport_no || "",
-        nationality: parsed.nationality || newAcc[idx].nationality || "",
-        date_of_birth: parsed.dateOfBirth || newAcc[idx].date_of_birth || "",
-        gender: parsed.gender || newAcc[idx].gender || "",
-        source: "ocr",
-      };
-      setAccompanying(newAcc);
+      setAccompanying(current => normalizeCompanions(current).map(guest =>
+        guest.passport_guest_index === guestSlot ? {
+          ...guest,
+          passport_scan_id: scanData.scan_id,
+          full_name: ocrName || guest.full_name,
+          passport_no: parsed.passportNumber || guest.passport_no || "",
+          nationality: parsed.nationality || guest.nationality || "",
+          date_of_birth: parsed.dateOfBirth || guest.date_of_birth || "",
+          gender: parsed.gender || guest.gender || "",
+          source: "ocr",
+        } : guest
+      ));
 
       const missing: string[] = [];
       if (!ocrName) missing.push("Name");
@@ -323,14 +362,15 @@ export default function GuestInfo() {
       if (!parsed.dateOfBirth) missing.push("DOB");
       if (!parsed.gender) missing.push("Gender");
       if (missing.length > 0) {
-        setAccOcrWarnings(prev => new Map(prev).set(idx, missing));
+        setAccOcrWarnings(prev => new Map(prev).set(guestSlot, missing));
       } else {
-        setAccOcrWarnings(prev => { const m = new Map(prev); m.delete(idx); return m; });
+        setAccOcrWarnings(prev => { const m = new Map(prev); m.delete(guestSlot); return m; });
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : "Scan failed. Please try again.";
       alert(message);
     } finally {
+      if (accScanSlotRef.current === guestSlot) accScanSlotRef.current = null;
       setAccScanning(null);
       if (accCameraRef.current) accCameraRef.current.value = "";
     }
@@ -339,6 +379,29 @@ export default function GuestInfo() {
   const triggerAccScan = (idx: number) => {
     setAccScanning(idx);
     setTimeout(() => accCameraRef.current?.click(), 50);
+  };
+
+  const requestScan = (index: number) => {
+    if (hasGuestData(index < 0 ? mainGuest : accompanying[index], index < 0 ? mainScanId : null)) {
+      setOverwriteTarget(index);
+      return;
+    }
+    if (index < 0) mainCameraRef.current?.click();
+    else triggerAccScan(index);
+  };
+
+  const confirmRemoval = () => {
+    if (removeTarget === null) return;
+    const currentParty = normalizeCompanions(accompanying);
+    if (accScanSlotRef.current === currentParty[removeTarget]?.passport_guest_index) accScanSlotRef.current = null;
+    const remaining = currentParty.filter((_, index) => index !== removeTarget);
+    setAccompanying(remaining);
+    setAccOcrWarnings(new Map());
+    setRemoveTarget(null);
+    const key = `mobile-checkin-${resId}`;
+    let current: Record<string, unknown> = {};
+    try { current = JSON.parse(sessionStorage.getItem(key) || "{}"); } catch { /* Corrupt stored session. */ }
+    sessionStorage.setItem(key, JSON.stringify({ ...current, accompanying_guests: remaining, accompanying: remaining }));
   };
 
   return (
@@ -390,7 +453,7 @@ export default function GuestInfo() {
               )}
               <button
                 type="button"
-                onClick={() => mainCameraRef.current?.click()}
+                onClick={() => requestScan(-1)}
                 disabled={mainScanning}
                 className="inline-flex items-center gap-1 text-xs font-bold bg-brand-100 dark:bg-brand-500/20 text-brand-700 dark:text-brand-400 px-3 py-1.5 rounded-full hover:bg-brand-200 dark:hover:bg-brand-500/30 transition disabled:opacity-50"
               >
@@ -540,7 +603,7 @@ export default function GuestInfo() {
           {accompanying.map((acc, idx) => (
             <div key={idx} className="bg-[var(--bg-surface)] rounded-2xl shadow-sm border border-[var(--border-default)] overflow-hidden">
               <div className="px-5 py-2.5 border-b border-[var(--border-default)] bg-[var(--bg-muted)] flex justify-between items-center">
-                <span className="text-xs font-bold text-[var(--text-muted)] uppercase">Guest {idx + 1}</span>
+                <span className="text-xs font-bold text-[var(--text-muted)] uppercase">Guest {companionSlot(acc, idx)}</span>
                 <div className="flex items-center gap-2">
                   {acc.source === "ocr" && (
                     <span className="inline-flex items-center gap-1 text-[10px] font-bold bg-emerald-100 dark:bg-emerald-500/20 text-emerald-700 dark:text-emerald-400 px-2 py-0.5 rounded-full uppercase">
@@ -549,7 +612,7 @@ export default function GuestInfo() {
                   )}
                   <button
                     type="button"
-                    onClick={() => triggerAccScan(idx)}
+                    onClick={() => requestScan(idx)}
                     disabled={accScanning != null}
                     className="inline-flex items-center gap-1 text-[10px] font-bold bg-brand-100 dark:bg-brand-500/20 text-brand-700 dark:text-brand-400 px-2 py-1 rounded-full hover:bg-brand-200 transition disabled:opacity-50"
                   >
@@ -565,11 +628,11 @@ export default function GuestInfo() {
                 </div>
               </div>
 
-              {accOcrWarnings.has(idx) && (
+              {accOcrWarnings.has(companionSlot(acc, idx)) && (
                 <div className="mx-5 mt-3 bg-amber-50 dark:bg-amber-500/10 border border-amber-300 dark:border-amber-500/30 rounded-lg p-2.5 flex items-start gap-2">
                   <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
                   <p className="text-xs font-semibold text-amber-700 dark:text-amber-400">
-                    OCR ไม่ครบ กรุณาตรวจสอบ: {accOcrWarnings.get(idx)!.join(", ")}
+                    OCR ไม่ครบ กรุณาตรวจสอบ: {accOcrWarnings.get(companionSlot(acc, idx))!.join(", ")}
                   </p>
                 </div>
               )}
@@ -641,6 +704,28 @@ export default function GuestInfo() {
         </div>
         </>
       )}
+      {overwriteTarget !== null && (
+        <div role="dialog" aria-modal="true" aria-label="Confirm passport overwrite" className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-6">
+          <div className="rounded-xl bg-[var(--bg-surface)] p-6 space-y-4">
+            <p>Scanning again will replace this guest's details. Continue?</p>
+            <button type="button" className="btn btn-secondary" onClick={() => setOverwriteTarget(null)}>Cancel</button>
+            <button type="button" className="btn btn-primary" onClick={() => {
+              const index = overwriteTarget; setOverwriteTarget(null);
+              if (index < 0) mainCameraRef.current?.click(); else triggerAccScan(index);
+            }}>Scan again</button>
+          </div>
+        </div>
+      )}
+      {removeTarget !== null && (
+        <div role="dialog" aria-modal="true" aria-label="Confirm guest removal" className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-6">
+          <div className="rounded-xl bg-[var(--bg-surface)] p-6 space-y-4">
+            <p>Delete this accompanying guest?</p>
+            <button type="button" className="btn btn-secondary" onClick={() => setRemoveTarget(null)}>Cancel</button>
+            <button type="button" className="btn btn-primary" onClick={confirmRemoval}>Delete guest</button>
+          </div>
+        </div>
+      )}
+      {savedNotice && <div role="status" className="fixed bottom-24 inset-x-4 rounded-xl bg-amber-100 p-4 text-amber-900" onClick={() => setSavedNotice(null)}>{savedNotice}</div>}
     </div>
   );
 }

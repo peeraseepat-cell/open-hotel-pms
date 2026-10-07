@@ -129,7 +129,8 @@ export async function listPendingRewashEvents(
 
 export async function resolveRewashEvent(
   supabase: SupabaseClient,
-  input: { id: number; resolvedBatchId: string; resolvedQty: number }
+  input: { id: number; resolvedBatchId: string; resolvedQty: number },
+  deletePhotos: (keys: string[]) => Promise<unknown> = deleteR2Objects
 ) {
   const { data: existing, error: existingError } = await supabase
     .from("laundry_rewash_events")
@@ -171,7 +172,7 @@ export async function resolveRewashEvent(
   let deleted = false;
   if (isFullyResolved && photoKeys.length > 0) {
     try {
-      await deleteR2Objects(photoKeys);
+      await deletePhotos(photoKeys);
       deleted = true;
     } catch (deleteError) {
       console.error("Failed to delete rewash photos", deleteError);
@@ -179,14 +180,22 @@ export async function resolveRewashEvent(
   }
 
   if (deleted) {
-    const { data: cleared, error: clearError } = await supabase
-      .from("laundry_rewash_events")
-      .update({ photo_keys: [] })
-      .eq("id", input.id)
-      .select("*")
-      .single();
-    if (clearError) throw new Error(clearError.message);
-    Object.assign(event as any, cleared);
+    try {
+      const { data: cleared, error: clearError } = await supabase
+        .from("laundry_rewash_events")
+        .update({ photo_keys: [] })
+        .eq("id", input.id)
+        .select("*")
+        .single();
+      if (clearError) throw new Error(clearError.message);
+      Object.assign(event as any, cleared);
+    } catch (clearError) {
+      console.error("Failed to clear resolved rewash photo keys", {
+        rewash_event_id: input.id,
+        stale_keys: photoKeys,
+        error: clearError,
+      });
+    }
   }
 
   await supabase.from("laundry_batch_events").insert({

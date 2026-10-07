@@ -53,6 +53,15 @@ export default function ScanPassport() {
       const scanData = json1.data;
       setScanResult(scanData);
 
+      if (scanData.mrz_failed || !scanData.parsed) {
+        sessionStorage.removeItem("mobile-checkin-temp-ocr");
+        // MRZ unreadable — the photo is already saved to the pool. Skip auto-match and
+        // force manual room selection (the guest name is confirmed later at that step).
+        setMatchResult(null);
+        setStep("result");
+        return;
+      }
+
       // 2. Match Booking
       const ocrName = `${scanData.parsed.firstName} ${scanData.parsed.familyName}`;
       const res2 = await fetch("/api/checkin/match-booking", {
@@ -193,7 +202,9 @@ export default function ScanPassport() {
                 </h2>
                 
                 <p className="mt-2 text-sm font-medium text-amber-800 dark:text-amber-200">
-                  Passport photo saved (30 days). Name similarity below 80%.
+                  {scanResult?.mrz_failed
+                    ? "เก็บรูปพาสปอร์ตแล้ว (30 วัน) แต่อ่าน MRZ ไม่ออก — เลือกห้องแล้วกรอกข้อมูลแขกเอง"
+                    : "Passport photo saved (30 days). Name similarity below 80%."}
                 </p>
 
                 <div className="mt-6 bg-amber-100 dark:bg-amber-900/50 p-4 rounded-xl border border-amber-200 dark:border-amber-500/20">

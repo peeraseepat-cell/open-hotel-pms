@@ -4,6 +4,7 @@ import { createServerSupabaseClient } from "@/lib/supabase/server";
 import { getAuthenticatedUser, getUserRole } from "@/lib/server-auth";
 
 export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
 
 const querySchema = z.object({
   unread: z.coerce.boolean().optional(),

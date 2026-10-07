@@ -1102,6 +1102,7 @@ export default function MaidPage() {
         <LfReportSheet
           isOpen={isReportSheetOpen}
           onClose={() => setIsReportSheetOpen(false)}
+          onReopen={() => setIsReportSheetOpen(true)}
           onSuccess={() => {
             // no-op for now
           }}

@@ -54,7 +54,23 @@ type ReservationForLink = {
   checkin_date: string;
   checkout_date: string;
   status: string;
+  checked_in_at: string | null;
+  checkin_time: string | null;
 };
+
+/** Mirror A1 helper in linked-extension.ts — HH:mm Asia/Bangkok from ISO. */
+function extractHHmmFromIso(iso: string | null): string | null {
+  const value = String(iso ?? "").trim();
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return new Intl.DateTimeFormat("en-GB", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: "Asia/Bangkok",
+  }).format(date);
+}
 
 export async function linkStay(params: {
   supabase: SupabaseLike;
@@ -74,7 +90,7 @@ export async function linkStay(params: {
   // Load both reservations
   const { data: rows, error: loadError } = await supabase
     .from("reservations")
-    .select("id, parent_reservation_id, guest_profile_id, guest_name, checkin_date, checkout_date, status")
+    .select("id, parent_reservation_id, guest_profile_id, guest_name, checkin_date, checkout_date, status, checked_in_at, checkin_time")
     .in("id", [parentReservationId, child_reservation_id]);
 
   if (loadError) {
@@ -138,6 +154,19 @@ export async function linkStay(params: {
 
   // If dates are reversed (child is actually before parent), swap relationship:
   // the one with earlier checkin should be root/parent
+  const reversedDates = childCheckout === parentCheckin;
+  const earlier = reversedDates ? child : parent;
+  const later = reversedDates ? parent : child;
+  const autoCheckedIn = Boolean(
+    earlier.checked_in_at && earlier.status === "active" &&
+    !later.checked_in_at && later.status === "active"
+  );
+  const inheritedFields = autoCheckedIn ? {
+    status: "active",
+    checked_in_at: earlier.checked_in_at,
+    checkin_time: String(earlier.checkin_time ?? "").trim() || extractHHmmFromIso(earlier.checked_in_at),
+  } : {};
+
   let effectiveRootId = rootParentId;
   if (childCheckout === parentCheckin) {
     // Child is chronologically before parent — child should be root
@@ -146,7 +175,7 @@ export async function linkStay(params: {
 
     const { error: swapError } = await supabase
       .from("reservations")
-      .update({ parent_reservation_id: child_reservation_id })
+      .update({ parent_reservation_id: child_reservation_id, ...inheritedFields })
       .eq("id", parentReservationId);
 
     if (swapError) {
@@ -156,7 +185,7 @@ export async function linkStay(params: {
     // Normal case: parent checkout = child checkin
     const { error: linkError } = await supabase
       .from("reservations")
-      .update({ parent_reservation_id: effectiveRootId })
+      .update({ parent_reservation_id: effectiveRootId, ...inheritedFields })
       .eq("id", child_reservation_id);
 
     if (linkError) {
@@ -172,6 +201,19 @@ export async function linkStay(params: {
 
   const linkedCount = (count ?? 0) + 1; // +1 for root itself
 
+  if (autoCheckedIn) {
+    try {
+      for (const action of ["checked_in", "auto_checkin_linked_extension"]) {
+        await supabase.from("audit_logs").insert({
+          action, entity_type: "reservation", entity_id: later.id,
+          before_json: { parent_reservation_id: effectiveRootId },
+          after_json: { ...inheritedFields, reason: "Inherited check-in from linked stay" },
+          business_date: businessDate, source: auditSource,
+        });
+      }
+    } catch { /* The reservation update already succeeded. */ }
+  }
+
   // Audit log
   await supabase.from("audit_logs").insert({
     action: "linked_stay_manual_link",
@@ -184,6 +226,7 @@ export async function linkStay(params: {
       parent_reservation_id: effectiveRootId,
       linked_count: linkedCount,
       note: note || null,
+      auto_checked_in: autoCheckedIn,
     },
     business_date: businessDate,
     source: auditSource,
@@ -227,7 +270,7 @@ export async function unlinkStay(params: {
   // Load child reservation (the one being unlinked)
   const { data: reservation, error: loadError } = await supabase
     .from("reservations")
-    .select("id, parent_reservation_id, status, checkin_date, checkout_date, checked_in_at")
+    .select("id, parent_reservation_id, status, checkin_date, checkout_date, checked_in_at, checkin_time")
     .eq("id", reservationId)
     .maybeSingle();
 
@@ -256,7 +299,7 @@ export async function unlinkStay(params: {
   //   - 22 Mar after parent C/O + child C/I: BLOCKED (transition done, parent closed)
   const { data: parentReservation, error: parentLoadError } = await supabase
     .from("reservations")
-    .select("id, status, checked_in_at, checkout_date")
+    .select("id, status, checked_in_at, checkin_time, checkout_date")
     .eq("id", parentId)
     .maybeSingle();
 
@@ -294,14 +337,46 @@ export async function unlinkStay(params: {
     );
   }
 
+  // Clear inherited check-in when parent is still in-house and stamps match (FO Unlink→Link smoke).
+  // Independent check-ins (different timestamps) are left alone.
+  let clearedInheritedCheckin = false;
+  const parentCheckedInAt = parentReservation.checked_in_at
+    ? String(parentReservation.checked_in_at)
+    : null;
+  const childCheckedInAt = reservation.checked_in_at ? String(reservation.checked_in_at) : null;
+  const parentStillInHouse =
+    Boolean(parentCheckedInAt) &&
+    String(parentReservation.status ?? "").toLowerCase() !== "checked_out";
+  const stampsMatch =
+    Boolean(childCheckedInAt) &&
+    Boolean(parentCheckedInAt) &&
+    childCheckedInAt === parentCheckedInAt;
+
+  clearedInheritedCheckin = parentStillInHouse && stampsMatch;
+
   // Perform unlink
   const { error: unlinkError } = await supabase
     .from("reservations")
-    .update({ parent_reservation_id: null })
+    .update({
+      parent_reservation_id: null,
+      ...(clearedInheritedCheckin ? { checked_in_at: null, checkin_time: null } : {}),
+    })
     .eq("id", reservationId);
 
   if (unlinkError) {
     throw new LinkedStayManagementError(unlinkError.message ?? "Failed to unlink reservation.", 500);
+  }
+
+  if (clearedInheritedCheckin) {
+    try {
+      await supabase.from("audit_logs").insert({
+        action: "linked_stay_clear_inherited_checkin",
+        entity_type: "reservation", entity_id: reservationId,
+        before_json: { parent_reservation_id: parentId, checked_in_at: childCheckedInAt, checkin_time: reservation.checkin_time ?? null },
+        after_json: { parent_reservation_id: null, checked_in_at: null, checkin_time: null },
+        business_date: businessDate, source: auditSource,
+      });
+    } catch { /* The reservation update already succeeded. */ }
   }
 
   // Check if this was the root being unlinked (other children might reference this)
@@ -346,6 +421,7 @@ export async function unlinkStay(params: {
       parent_reservation_id: null,
       remaining_linked_count: remainingCount,
       note: note || null,
+      cleared_inherited_checkin: clearedInheritedCheckin,
     },
     business_date: businessDate,
     source: auditSource,

@@ -1268,6 +1268,7 @@ export default function BoardPage() {
                         guest_name: String(reservation.guest_name ?? ""),
                         phone: reservation.phone ?? null,
                         room_type_id: reservation.room_type_id ? String(reservation.room_type_id) : null,
+                        parent_reservation_id: reservation.parent_reservation_id ?? null,
                         source: normalizeBookingSource(reservation.source),
                         checkin_date: String(reservation.checkin_date ?? ""),
                         checkout_date: String(reservation.checkout_date ?? ""),

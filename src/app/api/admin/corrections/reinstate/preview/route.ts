@@ -9,6 +9,7 @@ import { assertAdminOrSupervisor, getAuthenticatedUser } from "@/lib/server-auth
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 
 export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
 
 const querySchema = z.object({
   reservation_id: z.string().trim().min(1),

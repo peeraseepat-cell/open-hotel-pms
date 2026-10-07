@@ -27,7 +27,9 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { containsMaskedPlaceholder } from "@/lib/data-masking";
 import { addDays } from "@/lib/dates";
 import { checkProfileCompleteness } from "@/lib/guest-profile-completeness";
+import { shouldForkSharedProfile } from "@/lib/guest-booking-names";
 import { buildBookedNameNoteLine, classifyGuestNameMatch } from "@/lib/guest-name-match";
+import { buildDayUseExtendRequest, formatDayUseExtendConfirm } from "@/lib/dayuse-extend-confirm";
 import { formatMoney, fromSatang, toSatang } from "@/lib/money";
 import { NATIONALITIES, formatNationality, getCountryByCode, normalizeNationalityCode } from "@/lib/nationality-map";
 import { computeHeldDepositFromRows } from "@/lib/deposit-ledger";
@@ -42,6 +44,7 @@ import { useRouter } from "next/navigation";
 import LinkedStayPanel from "./linked-stay-panel";
 import LinkStayModal from "./link-stay-modal";
 import { useLostFoundPopup } from "@/components/providers/lost-found-popup-context";
+import { passportOcrGuestIndex } from "@/lib/checkin/passport-ocr-guest-index";
 
 type BookingMode = "create" | "edit" | "checkin" | "inhouse" | "checkout";
 type ReservationRecordStatus = "active" | "cancelled" | "checked_out" | "no_show" | "";
@@ -3641,13 +3644,12 @@ export default function ReservationDetailPage({
         );
 
         let profileId = guestProfileId;
-        const shouldForkSharedProfile =
-            Boolean(profileId) &&
-            Boolean(reservationId) &&
-            linkedProfileActiveReservationCount > 1 &&
-            classifyGuestNameMatch(linkedProfileName, guestName) === "mismatch";
+        const forkSharedProfile = shouldForkSharedProfile({
+            profileId, reservationId, activeReservationCount: linkedProfileActiveReservationCount,
+            linkedProfileName, guestName, profileBookingNames,
+        });
 
-        if (!profileId || shouldForkSharedProfile) {
+        if (!profileId || forkSharedProfile) {
             const createRes = await fetch("/api/guests", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -3725,6 +3727,9 @@ export default function ReservationDetailPage({
         mode,
         guestProfileId,
         reservationId,
+        linkedProfileName,
+        linkedProfileActiveReservationCount,
+        profileBookingNames,
         applyProfileDraft
     ]);
 
@@ -4046,19 +4051,27 @@ export default function ReservationDetailPage({
 
             if (dayUseAmountOnlyMode && reservationId) {
                 const parsedAmount = fromSatang(toSatang(paymentAmount));
-                if (!Number.isFinite(parsedAmount) || parsedAmount < 0) {
+                const extendRequest = buildDayUseExtendRequest({ paymentMethod, paymentAmount: parsedAmount });
+                if (!extendRequest) {
                     setError("Invalid extension amount.");
                     setLoading(false);
                     return;
                 }
 
+                const methodLabel = extendRequest.payment_method === "transfer"
+                    ? "Bank Transfer" : extendRequest.payment_method === "credit_card" ? "Credit Card" : "Cash";
+                if (!window.confirm(formatDayUseExtendConfirm({
+                    minutes: dayUseExtendMinutes ?? 60,
+                    amountLabel: `฿${formatMoney(extendRequest.payment_amount)}`,
+                    methodLabel,
+                }))) {
+                    setLoading(false);
+                    return;
+                }
                 const extendRes = await fetch(`/api/dayuse/${reservationId}/extend`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        payment_method: "cash",
-                        payment_amount: parsedAmount,
-                    })
+                    body: JSON.stringify(extendRequest)
                 });
                 const extendData = await extendRes.json().catch(() => null);
                 if (!extendRes.ok || !extendData?.success) {
@@ -6332,6 +6345,16 @@ export default function ReservationDetailPage({
                                                     disabled={interactionLocked || dayUseExtendSettingsLoading}
                                                 />
                                             </div>
+                                            <div>
+                                                <label className="form-label text-emerald-900 dark:text-emerald-300">Payment Method</label>
+                                                <select className="form-input text-sm" value={paymentMethod}
+                                                    onChange={(e) => setPaymentMethod(e.target.value)}
+                                                    disabled={interactionLocked || dayUseExtendSettingsLoading}>
+                                                    <option value="cash">Cash</option>
+                                                    <option value="transfer">Bank Transfer</option>
+                                                    <option value="credit_card">Credit Card</option>
+                                                </select>
+                                            </div>
                                             <p className="text-[11px] text-emerald-700">
                                                 Save will extend session by {dayUseExtendMinutes ?? 60} minutes.
                                             </p>
@@ -6711,8 +6734,18 @@ export default function ReservationDetailPage({
                                                 const member = partyDraft.linkedMemberId
                                                     ? displayedParty.find((m) => m.id === partyDraft.linkedMemberId)
                                                     : null;
-                                                const gi = member ? (member.display_order ?? 1) - 1 : accompanyingGuests.length;
-                                                openPassportOcr("accompany", Math.max(1, gi));
+                                                // For a NEW guest this has to predict the slot the server will
+                                                // assign — the first free one in [2,3,4], not the guest count.
+                                                // Counting agreed with the server only while the slots happened
+                                                // to be contiguous, so the button offered the previous guest's
+                                                // passport again and the next passenger's scan was unreachable.
+                                                const gi = passportOcrGuestIndex({
+                                                    memberDisplayOrder: member ? (member.display_order ?? null) : null,
+                                                    occupiedAccompanyingSlots: accompanyingGuests.map(
+                                                        (m) => m.display_order ?? 0
+                                                    ),
+                                                });
+                                                openPassportOcr("accompany", gi);
                                             }}
                                             disabled={isReadonly}
                                         >
@@ -7043,6 +7076,7 @@ export default function ReservationDetailPage({
                     reservationId={reservationId}
                     mode={mode}
                     isReadonly={lockPricingFields}
+                    allowPaymentMethodEdit={dayUseAmountOnlyMode && !readonlyClosedReservation}
                     totalPrice={totalPrice || 0}
                     depositAmount={depositAmount || 0}
                     policyFeePayload={policyFeePayload}

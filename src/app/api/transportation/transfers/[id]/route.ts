@@ -39,21 +39,6 @@ type TransferRow = {
   updated_at: string;
 };
 
-type TransferLedgerRow = {
-  tx_type: string;
-  amount: number | null;
-  selling_price: number | null;
-  cost_price: number | null;
-  margin: number | null;
-};
-
-type TransferLedgerTotals = {
-  net_amount: number;
-  net_selling: number;
-  net_cost: number;
-  net_margin: number;
-};
-
 const idSchema = z.string().uuid("Invalid transfer id");
 
 const transferPatchSchema = z
@@ -161,125 +146,6 @@ async function fetchTransportAlertLeadMinutes(
 
 function isBoatAlertType(transferType: string): boolean {
   return transferType === "bus_ferry_pickup" || transferType === "ticket_only";
-}
-
-function roundMoney(value: number): number {
-  return Math.round((value + Number.EPSILON) * 100) / 100;
-}
-
-function computeTransferLedgerTotals(rows: TransferLedgerRow[]): TransferLedgerTotals {
-  let netAmount = 0;
-  let netSelling = 0;
-  let netCost = 0;
-  let netMargin = 0;
-
-  for (const row of rows) {
-    const amount = Number(row.amount ?? 0);
-    const selling = Number(row.selling_price ?? amount);
-    const cost = Number(row.cost_price ?? 0);
-    const margin = Number(row.margin ?? (selling - cost));
-    const sign = row.tx_type === "refund" ? -1 : 1;
-    netAmount += sign * amount;
-    netSelling += sign * selling;
-    netCost += sign * cost;
-    netMargin += sign * margin;
-  }
-
-  return {
-    net_amount: roundMoney(netAmount),
-    net_selling: roundMoney(netSelling),
-    net_cost: roundMoney(netCost),
-    net_margin: roundMoney(netMargin),
-  };
-}
-
-async function insertAutoTransferTx(
-  supabase: ReturnType<typeof createServerSupabaseClient>,
-  params: {
-    transferId: string;
-    reservationId: string;
-    guestProfileId: string | null;
-    txType: "charge" | "refund";
-    amount: number;
-    sellingPrice: number;
-    costPrice: number;
-    margin: number;
-    paymentMethod: string | null;
-    note: string;
-  }
-) {
-  const { error } = await supabase.from("transfer_transactions").insert({
-    transfer_id: params.transferId,
-    reservation_id: params.reservationId,
-    guest_profile_id: params.guestProfileId,
-    tx_type: params.txType,
-    amount: roundMoney(params.amount),
-    selling_price: roundMoney(params.sellingPrice),
-    cost_price: roundMoney(params.costPrice),
-    margin: roundMoney(params.margin),
-    payment_method: params.paymentMethod,
-    cashier_name: null,
-    note: params.note,
-  });
-  if (error) throw new Error(error.message);
-}
-
-async function syncTransferLedgerAfterPatch(
-  supabase: ReturnType<typeof createServerSupabaseClient>,
-  params: {
-    transfer: TransferRow;
-    reason: string;
-  }
-) {
-  const transfer = params.transfer;
-  const transferId = String(transfer.id);
-  const reservationId = String(transfer.reservation_id ?? "");
-  if (!transferId || !reservationId) return;
-
-  const { data: txRows, error: txError } = await supabase
-    .from("transfer_transactions")
-    .select("tx_type, amount, selling_price, cost_price, margin")
-    .eq("transfer_id", transferId);
-  if (txError) throw new Error(txError.message);
-
-  const totals = computeTransferLedgerTotals((txRows ?? []) as TransferLedgerRow[]);
-  const desiredNetSelling =
-    transfer.payment_status === "paid_to_hotel" ? roundMoney(Number(transfer.selling_price ?? 0)) : 0;
-  const delta = roundMoney(desiredNetSelling - totals.net_selling);
-  if (Math.abs(delta) < 0.01) return;
-
-  const sellingBase = Number(transfer.selling_price ?? 0);
-  const costBase = Number(transfer.cost_price ?? 0);
-  const costRatio = sellingBase > 0 ? Math.max(0, Math.min(1, costBase / sellingBase)) : 0;
-  const txSell = Math.abs(delta);
-  const txCost = roundMoney(txSell * costRatio);
-  const txMargin = roundMoney(txSell - txCost);
-  const txType: "charge" | "refund" = delta > 0 ? "charge" : "refund";
-
-  const { data: reservation, error: reservationError } = await supabase
-    .from("reservations")
-    .select("guest_profile_id")
-    .eq("id", reservationId)
-    .maybeSingle();
-  if (reservationError) throw new Error(reservationError.message);
-
-  const paymentMethod =
-    transfer.payment_method && ["cash", "transfer", "credit_card"].includes(transfer.payment_method)
-      ? transfer.payment_method
-      : null;
-
-  await insertAutoTransferTx(supabase, {
-    transferId,
-    reservationId,
-    guestProfileId: reservation?.guest_profile_id ? String(reservation.guest_profile_id) : null,
-    txType,
-    amount: txSell,
-    sellingPrice: txSell,
-    costPrice: txCost,
-    margin: txMargin,
-    paymentMethod,
-    note: `Auto-sync ${txType} (${params.reason})`,
-  });
 }
 
 async function enrichTransfer(
@@ -657,26 +523,9 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
       updates.alert_enabled = payload.alert_enabled;
     }
 
-    const hasPricingUpdate =
-      payload.selling_price !== undefined ||
-      payload.cost_price !== undefined ||
-      payload.driver_fee !== undefined ||
-      payload.driver_commission !== undefined;
-    if (hasPricingUpdate) {
-      const nextSelling = payload.selling_price !== undefined ? payload.selling_price : current.selling_price;
-      const nextCost = payload.cost_price !== undefined ? payload.cost_price : current.cost_price;
-      const nextDriverFee = payload.driver_fee !== undefined ? payload.driver_fee : current.driver_fee;
-      const nextDriverCommissionRaw =
-        payload.driver_commission !== undefined ? payload.driver_commission : current.driver_commission;
-      const nextDriverCommission = nextDriverCommissionRaw ?? 0;
-      updates.net_commission = Number(
-        (((nextSelling ?? 0) - (nextCost ?? 0) - (nextDriverFee ?? 0) + nextDriverCommission)).toFixed(2)
-      );
-    }
-
     const nextStatus = String(updates.status ?? current.status);
     const nextPaymentStatus = String(updates.payment_status ?? current.payment_status);
-    const nextPaymentMethod = (updates.payment_method ?? current.payment_method ?? null) as string | null;
+    const nextPaymentMethod = ("payment_method" in updates ? updates.payment_method : current.payment_method ?? null) as string | null;
     if (nextPaymentStatus === "paid_to_hotel" && !nextPaymentMethod) {
       return NextResponse.json(
         { success: false, error: "payment_method is required when payment_status is paid_to_hotel." },
@@ -714,26 +563,37 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
       return NextResponse.json({ success: false, error: message }, { status: 409 });
     }
 
-    const { data: updated, error: updateError } = await supabase
-      .from("transfers")
-      .update(updates)
-      .eq("id", transferId)
-      .select("*")
-      .maybeSingle();
-    if (updateError) {
-      if (String(updateError.message ?? "").toLowerCase().includes("alert_enabled")) {
-        return NextResponse.json(
-          {
-            success: false,
-            error: "DB migration required: apply transfer alert switch migration before using this feature.",
-          },
-          { status: 500 }
-        );
+    const touchesMoney = ["selling_price", "cost_price", "driver_fee", "driver_commission", "payment_status", "payment_method"]
+      .some((key) => Object.prototype.hasOwnProperty.call(updates, key));
+    const isCancelRequest = updates.status === "cancelled";
+    let updated: TransferRow;
+    if (touchesMoney || isCancelRequest) {
+      let voucherNumber: string | null = null;
+      if (isCancelRequest) {
+        const { data: voucher, error } = await supabase.from("transfer_vouchers")
+          .select("voucher_number").eq("transfer_id", transferId).maybeSingle();
+        if (error) return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+        voucherNumber = voucher?.voucher_number ?? null;
       }
-      return NextResponse.json({ success: false, error: updateError.message }, { status: 500 });
-    }
-    if (!updated) {
-      return NextResponse.json({ success: false, error: "Transfer not found." }, { status: 404 });
+      const { data, error } = await supabase.rpc("transfer_write_atomic", {
+        p_transfer_id: transferId,
+        p_patch: updates,
+        p_cancel_reason: isCancelRequest ? payload.cancel_reason ?? null : null,
+        p_cancel_voucher_number: voucherNumber,
+      });
+      if (error) return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+      const result = typeof data === "string" ? JSON.parse(data) : data;
+      if (!result?.found) return NextResponse.json({ success: false, error: "Transfer not found." }, { status: 404 });
+      if (result.invalid === "payment_method_required") {
+        return NextResponse.json({ success: false, error: "payment_method is required when payment_status is paid_to_hotel." }, { status: 400 });
+      }
+      updated = result.transfer as TransferRow;
+    } else {
+      const { data, error } = await supabase.from("transfers")
+        .update(updates).eq("id", transferId).select("*").maybeSingle();
+      if (error) return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+      if (!data) return NextResponse.json({ success: false, error: "Transfer not found." }, { status: 404 });
+      updated = data as TransferRow;
     }
 
     const changedFields = Object.keys(updates);
@@ -760,22 +620,6 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
     const becameCancelled = oldStatus !== "cancelled" && newStatus === "cancelled";
     const pickupChanged = String(current.pickup_datetime) !== String(updated.pickup_datetime);
     const noteChanged = String(current.staff_note ?? "") !== String(updated.staff_note ?? "");
-    const paymentStatusChanged = String(current.payment_status ?? "") !== String(updated.payment_status ?? "");
-    const paymentMethodChanged = String(current.payment_method ?? "") !== String(updated.payment_method ?? "");
-    const sellingPriceChanged = Number(current.selling_price ?? 0) !== Number(updated.selling_price ?? 0);
-
-    if (!becameCancelled && (hasPricingUpdate || paymentStatusChanged || paymentMethodChanged || sellingPriceChanged)) {
-      try {
-        await syncTransferLedgerAfterPatch(supabase, {
-          transfer: updated as TransferRow,
-          reason: "transfer patch update",
-        });
-      } catch (syncError) {
-        const message = syncError instanceof Error ? syncError.message : "Failed to sync transfer ledger.";
-        return NextResponse.json({ success: false, error: message }, { status: 500 });
-      }
-    }
-
     if (pickupChanged || noteChanged) {
       const voucherUpdates: Record<string, unknown> = {};
       if (pickupChanged) {
@@ -833,77 +677,7 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
         }
       }
 
-      // ══════════════════════════════════════════════════════
-      // ★ PHASE 11A: Reversal — refund transfer_transactions + reverse commission
-      // ══════════════════════════════════════════════════════
-      const cancelReason = payload.cancel_reason ?? "Transfer cancelled";
 
-      // 1. Insert refund row only when there is net outstanding charge in ledger
-      const { data: txRows, error: txRowsError } = await supabase
-        .from("transfer_transactions")
-        .select("tx_type, amount, selling_price, cost_price, margin")
-        .eq("transfer_id", transferId);
-      if (txRowsError) {
-        return NextResponse.json({ success: false, error: txRowsError.message }, { status: 500 });
-      }
-      const totals = computeTransferLedgerTotals((txRows ?? []) as TransferLedgerRow[]);
-      const outstandingSell = roundMoney(Math.max(0, totals.net_selling));
-      if (outstandingSell > 0) {
-        const costRatio =
-          totals.net_selling > 0 ? Math.max(0, Math.min(1, totals.net_cost / totals.net_selling)) : 0;
-        const refundCost = roundMoney(outstandingSell * costRatio);
-        const refundMargin = roundMoney(outstandingSell - refundCost);
-        const { data: resData, error: resDataError } = await supabase
-          .from("reservations")
-          .select("guest_profile_id")
-          .eq("id", current.reservation_id)
-          .maybeSingle();
-        if (resDataError) {
-          return NextResponse.json({ success: false, error: resDataError.message }, { status: 500 });
-        }
-
-        const paymentMethod =
-          current.payment_method && ["cash", "transfer", "credit_card"].includes(String(current.payment_method))
-            ? String(current.payment_method)
-            : null;
-        const { error: refundError } = await supabase.from("transfer_transactions").insert({
-          transfer_id: transferId,
-          reservation_id: current.reservation_id,
-          guest_profile_id: resData?.guest_profile_id ?? null,
-          tx_type: "refund",
-          amount: outstandingSell,
-          selling_price: outstandingSell,
-          cost_price: refundCost,
-          margin: refundMargin,
-          payment_method: paymentMethod,
-          cashier_name: null,
-          note: `Cancel refund: ${cancelReason} - ${voucher?.voucher_number ?? transferId}`,
-        });
-        if (refundError) {
-          return NextResponse.json({ success: false, error: refundError.message }, { status: 500 });
-        }
-      }
-
-      // 2. Reverse any linked commission
-      const { data: linkedCommissions } = await supabase
-        .from("commission_ledger")
-        .select("id, status")
-        .eq("transfer_id", transferId)
-        .neq("status", "reversed");
-
-      for (const com of linkedCommissions ?? []) {
-        const { error: comReverseError } = await supabase
-          .from("commission_ledger")
-          .update({
-            status: "reversed",
-            reversal_reason: cancelReason,
-            reversed_at: new Date().toISOString(),
-          })
-          .eq("id", com.id);
-        if (comReverseError) {
-          console.error("Phase 11A: commission reverse failed", comReverseError);
-        }
-      }
     }
 
     if (pickupChanged && String(updated.status) !== "cancelled" && String(updated.status) !== "completed") {

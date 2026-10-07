@@ -7,6 +7,7 @@ import {
   prepareCoverageLineItems,
   TaxInvoiceCoverageError,
 } from "@/lib/tax-invoice/coverage";
+import { collectFullyCoveredReservationIds } from "@/lib/tax-invoice/pending-fully-covered";
 import type { TaxInvoiceKind, TaxInvoiceLanguage } from "@/lib/tax-invoice/types";
 import {
   buildLineItemsForReservation,
@@ -396,7 +397,7 @@ export async function GET(request: NextRequest) {
           () =>
             supabase
               .from("invoices")
-              .select("id, reservation_id, booking_snapshot, invoice_kind", { count: "exact" })
+              .select("id, reservation_id, booking_snapshot, invoice_kind, coverage_amount, grand_total", { count: "exact" })
               .eq("status", "issued"),
           { label: "issued invoices" }
         );
@@ -412,11 +413,7 @@ export async function GET(request: NextRequest) {
         }
       }
 
-      const fullyCoveredSet = new Set(
-        (issuedRows ?? [])
-          .filter((row: any) => normalizeInvoiceKind(row.invoice_kind) !== "prepayment")
-          .flatMap((row: any) => extractReservationIdsFromBookingSnapshot(row.booking_snapshot, row.reservation_id))
-      );
+      const fullyCoveredSet = collectFullyCoveredReservationIds(issuedRows ?? []);
       const pendingFiltered = (pendingRows ?? []).filter((row: any) => !fullyCoveredSet.has(String(row.id)));
       const pendingIds = pendingFiltered.map((row: any) => String(row.id));
 

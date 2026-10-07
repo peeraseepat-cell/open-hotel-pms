@@ -1,4 +1,4 @@
-import { normalizeGuestName } from "@/lib/guest-name-match";
+import { classifyGuestNameMatch, normalizeGuestName } from "@/lib/guest-name-match";
 
 type SupabaseLike = {
   from: (table: string) => any;
@@ -461,4 +461,21 @@ export async function findPossibleReturnCandidatesByBookingNames(
   });
 
   return result;
+}
+
+export function shouldForkSharedProfile(params: {
+  profileId: string | null;
+  reservationId: string | null | undefined;
+  activeReservationCount: number;
+  linkedProfileName: string;
+  guestName: string;
+  profileBookingNames: readonly string[];
+}): boolean {
+  if (!params.profileId || !params.reservationId) return false;
+  if (params.activeReservationCount <= 1) return false;
+  const guestNorm = normalizeGuestName(params.guestName);
+  if (params.profileBookingNames.some((name) => normalizeGuestName(name) === guestNorm && guestNorm.length > 0)) {
+    return false;
+  }
+  return classifyGuestNameMatch(params.linkedProfileName, params.guestName) === "mismatch";
 }

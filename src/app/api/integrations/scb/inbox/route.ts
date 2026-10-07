@@ -6,6 +6,7 @@ import { reconcileScbRequestStatuses } from "@/lib/scb/inquiry-runner";
 import { loadPosMetaMap, loadReservationMetaMap } from "@/lib/scb/targets";
 
 export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
 
 const querySchema = z.object({
   tab: z.enum(["pending", "matched", "unmatched", "expired_failed", "recheck_history"]).default("pending"),

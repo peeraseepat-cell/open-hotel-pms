@@ -1875,6 +1875,24 @@ export interface LaundryReturnSourceItem extends LaundryBatchItem {
   source_business_date: string;
   source_pickup_round: number;
   remaining_qty: number;
+  lane: LaundryReturnPartitionLane;
+}
+
+export type LaundryReturnPartitionLane = "recent" | "overdue";
+
+export interface LaundryReturnPartitionRow {
+  id: string;
+  source_batch_id: string;
+  linen_item_id: number;
+  is_dayuse: boolean;
+  sent_by_hotel: number;
+  received_back: number;
+  remaining_qty: number;
+  source_business_date: string;
+  source_pickup_round: number;
+  lane: LaundryReturnPartitionLane;
+  item_number: number;
+  name_th: string;
 }
 
 export type LaundryBatchEventType =

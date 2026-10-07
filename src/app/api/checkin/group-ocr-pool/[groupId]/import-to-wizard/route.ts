@@ -1,6 +1,6 @@
 import { extractScanOrderFromOcrRaw, requireDesktopGroupOcrAuth } from "@/lib/group-ocr";
 import { ensureWizardStep, mergeDraftJson, pickBusinessDate } from "@/lib/group-checkin-wizard";
-import { getBusinessDate, getWizardDraft, upsertWizardDraft } from "@/lib/group-checkin-wizard-service";
+import { getBusinessDate, getWizardDraft, updateWizardDraftAtRevision, WizardDraftRevisionConflictError } from "@/lib/group-checkin-wizard-service";
 import { MobileCheckinError } from "@/lib/mobile-checkin";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 import { NextRequest, NextResponse } from "next/server";
@@ -18,9 +18,23 @@ type ScanRow = {
   id: string;
   guest_profile_id: string | null;
   pool_status: "ready" | "ocr_failed" | "assigned";
+  reservation_id: string | null;
+  matched_reservation_id: string | null;
+  guest_index: number | null;
   ocr_raw: unknown;
   created_at: string | null;
 };
+
+function rowsFromMutation(data: unknown): Array<Record<string, unknown>> {
+  if (Array.isArray(data)) return data.filter((row): row is Record<string, unknown> => Boolean(row && typeof row === "object"));
+  return data && typeof data === "object" ? [data as Record<string, unknown>] : [];
+}
+
+function applyNullableFilter(query: any, column: string, value: unknown) {
+  return value === null || value === undefined
+    ? query.is(column, null)
+    : query.eq(column, value);
+}
 
 export async function POST(
   request: NextRequest,
@@ -73,7 +87,7 @@ export async function POST(
 
     let scanQuery = supabase
       .from("passport_scans")
-      .select("id, guest_profile_id, pool_status, ocr_raw, created_at")
+      .select("id, guest_profile_id, pool_status, reservation_id, matched_reservation_id, guest_index, ocr_raw, created_at")
       .eq("booking_group_id", normalizedGroupId)
       .not("pool_status", "is", null)
       .order("created_at", { ascending: true });
@@ -94,6 +108,9 @@ export async function POST(
         id: String(row.id ?? ""),
         guest_profile_id: row.guest_profile_id ? String(row.guest_profile_id) : null,
         pool_status: String(row.pool_status ?? "") as "ready" | "ocr_failed" | "assigned",
+        reservation_id: row.reservation_id ? String(row.reservation_id) : null,
+        matched_reservation_id: row.matched_reservation_id ? String(row.matched_reservation_id) : null,
+        guest_index: row.guest_index === null || row.guest_index === undefined ? null : Number(row.guest_index),
         ocr_raw: row.ocr_raw ?? null,
         created_at: row.created_at ? String(row.created_at) : null,
       }))
@@ -191,7 +208,7 @@ export async function POST(
       }
     }
 
-    const importedEntries = importRows
+    const candidateEntries = importRows
       .map((scan, index) => {
         const guestId = String(scan.guest_profile_id ?? "").trim();
         const profile = profileById.get(guestId);
@@ -209,7 +226,7 @@ export async function POST(
         return {
           scan_id: scan.id,
           guest_profile_id: guestId,
-          source: "passport_ocr",
+          source: "passport_ocr" as const,
           scan_order: extractScanOrderFromOcrRaw(scan.ocr_raw, index + 1),
           display_name: displayName,
           profile_status: profile.profile_status ? String(profile.profile_status) : null,
@@ -218,16 +235,11 @@ export async function POST(
       })
       .filter((value): value is NonNullable<typeof value> => Boolean(value));
 
+    const importedEntries = candidateEntries;
+
     const mergedScannedPool = [
       ...existingScannedPool,
-      ...importedEntries.map((entry) => ({
-        guest_profile_id: entry.guest_profile_id,
-        source: entry.source,
-        scan_order: entry.scan_order,
-        display_name: entry.display_name,
-        profile_status: entry.profile_status,
-        nationality_code: entry.nationality_code,
-      })),
+      ...importedEntries,
     ];
 
     const mergedGuestIds = Array.from(
@@ -247,39 +259,121 @@ export async function POST(
       }
     );
 
-    await upsertWizardDraft({
-      supabase,
-      groupId: normalizedGroupId,
-      businessDate,
-      status: "draft",
-      currentStep: ensureWizardStep(draft.current_step ?? 2, 2),
-      draftJson: mergedDraftJson,
-      touchCommittedAt: true,
-    });
+    const importedScanIds = importedEntries
+      .map((entry) => entry.scan_id)
+      .filter((value): value is string => Boolean(value));
+    let savedDraft: any = null;
+    try {
+      savedDraft = await updateWizardDraftAtRevision({
+        supabase,
+        groupId: normalizedGroupId,
+        businessDate,
+        expectedRevision: String(draft.updated_at ?? ""),
+        status: "draft",
+        currentStep: ensureWizardStep(draft.current_step ?? 2, 2),
+        draftJson: mergedDraftJson,
+        touchCommittedAt: true,
+      });
+      if (importedScanIds.length > 0) {
+        const { data: markedData, error: markError } = await supabase
+          .from("passport_scans")
+          .update({ pool_status: "assigned" })
+          .in("id", importedScanIds)
+          .eq("booking_group_id", normalizedGroupId)
+          .eq("pool_status", "ready")
+          .select("id, pool_status, guest_profile_id");
 
-    const importedScanIds = importedEntries.map((entry) => entry.scan_id);
-    if (importedScanIds.length > 0) {
-      const { error: markError } = await supabase
-        .from("passport_scans")
-        .update({ pool_status: "assigned" })
-        .in("id", importedScanIds)
-        .eq("booking_group_id", normalizedGroupId);
+        const markedRows = rowsFromMutation(markedData);
+        const expectedById = new Map(importRows.map((row) => [row.id, row]));
+        const markedIds = new Set(markedRows.map((row) => String(row.id ?? "")).filter(Boolean));
+        const markMatchesExactly = !markError
+          && markedRows.length === importedScanIds.length
+          && markedIds.size === importedScanIds.length
+          && importedScanIds.every((scanId) => {
+            const row = markedRows.find((candidate) => String(candidate.id ?? "") === scanId);
+            const expected = expectedById.get(scanId);
+            return Boolean(
+              row
+              && expected
+              && String(row.pool_status ?? "") === "assigned"
+              && String(row.guest_profile_id ?? "") === String(expected.guest_profile_id ?? ""),
+            );
+          });
 
-      if (markError) {
-        throw new MobileCheckinError(markError.message, 500, "SCAN_MARK_ASSIGNED_FAILED");
+        if (!markMatchesExactly) {
+          const scanRollbackOk = await Promise.all(
+            Array.from(markedIds).map(async (scanId) => {
+              const expected = expectedById.get(scanId);
+              if (!expected) return false;
+              let rollbackQuery = supabase
+                .from("passport_scans")
+                .update({ pool_status: "ready" })
+                .eq("id", scanId)
+                .eq("booking_group_id", normalizedGroupId)
+                .eq("guest_profile_id", expected.guest_profile_id)
+                .eq("pool_status", "assigned");
+              rollbackQuery = applyNullableFilter(rollbackQuery, "reservation_id", expected.reservation_id);
+              rollbackQuery = applyNullableFilter(rollbackQuery, "matched_reservation_id", expected.matched_reservation_id);
+              rollbackQuery = rollbackQuery.eq("guest_index", expected.guest_index ?? 0);
+              const { data, error } = await rollbackQuery
+                .select("id, pool_status, guest_profile_id, reservation_id, matched_reservation_id, guest_index");
+              const rows = rowsFromMutation(data);
+              return !error
+                && rows.length === 1
+                && String(rows[0]?.id ?? "") === scanId
+                && String(rows[0]?.pool_status ?? "") === "ready";
+            }),
+          ).then((results) => results.every(Boolean));
+
+          let draftRollbackOk = true;
+          try {
+            await updateWizardDraftAtRevision({
+              supabase,
+              groupId: normalizedGroupId,
+              businessDate,
+              expectedRevision: String(savedDraft.updated_at ?? ""),
+              status: "draft",
+              currentStep: ensureWizardStep(draft.current_step ?? 2, 2),
+              draftJson,
+              touchCommittedAt: true,
+            });
+          } catch {
+            draftRollbackOk = false;
+          }
+          if (!scanRollbackOk || !draftRollbackOk) {
+            throw new MobileCheckinError(
+              "Import could not mark scans assigned or restore the Wizard Pool.",
+              500,
+              "SCAN_MARK_ASSIGNED_ROLLBACK_FAILED",
+            );
+          }
+          throw new MobileCheckinError(
+            markError?.message ?? "One or more scans changed before import completed.",
+            markError ? 500 : 409,
+            markError ? "SCAN_MARK_ASSIGNED_FAILED" : "SCAN_MARK_ASSIGNED_CONFLICT",
+          );
+        }
       }
+    } catch (error) {
+      if (error instanceof WizardDraftRevisionConflictError) throw error;
+      throw error;
     }
-
-    const skippedCount = skippedReasons.length;
 
     return NextResponse.json({
       success: true,
+      draft_revision: savedDraft?.updated_at ?? null,
       imported_count: importedScanIds.length,
       imported_scan_ids: importedScanIds,
-      skipped_count: skippedCount,
+      skipped_count: skippedReasons.length,
       skipped_reasons: skippedReasons,
     });
   } catch (error) {
+    if (error instanceof WizardDraftRevisionConflictError) {
+      return NextResponse.json(
+        { success: false, error: error.message, code: "DRAFT_REVISION_CONFLICT" },
+        { status: 409 },
+      );
+    }
     if (error instanceof MobileCheckinError) {
       return NextResponse.json(
         {

@@ -21,6 +21,40 @@ function ensureNonNegativeInt(value: unknown, field: string): number {
   return parsed;
 }
 
+export function allocatePendingAcrossVariants(
+  rows: Array<{
+    id: string;
+    sent_by_hotel: number;
+    received_back: number;
+    is_dayuse: boolean;
+  }>,
+  pendingQty: number
+) {
+  let remaining = ensureNonNegativeInt(pendingQty, "pending_qty");
+  const allocations: Array<{ id: string; qty: number; is_dayuse: boolean }> = [];
+  const orderedRows = [...rows].sort(
+    (left, right) => Number(Boolean(left.is_dayuse)) - Number(Boolean(right.is_dayuse))
+  );
+
+  for (const row of orderedRows) {
+    const sentQty = ensureNonNegativeInt(row.sent_by_hotel, "sent_by_hotel");
+    const receivedQty = ensureNonNegativeInt(row.received_back, "received_back");
+    const available = Math.max(0, sentQty - receivedQty);
+    const qty = Math.min(remaining, available);
+    if (qty > 0) {
+      allocations.push({ id: String(row.id), qty, is_dayuse: Boolean(row.is_dayuse) });
+      remaining -= qty;
+    }
+    if (remaining === 0) break;
+  }
+
+  if (remaining > 0) {
+    throw new Error("Pending quantity exceeds authoritative remaining linen.");
+  }
+
+  return allocations;
+}
+
 export async function listPendingItems(supabase: SupabaseClient) {
   const { data, error } = await supabase
     .from("laundry_pending_items")
@@ -186,22 +220,46 @@ export async function resolvePendingItems(
     if (!pending) continue;
     affectedSourceBatchIds.add(String((pending as any).source_batch_id));
 
-    const { data: item, error: itemError } = await supabase
+    const { data: sourceItems, error: itemError } = await supabase
       .from("laundry_batch_items")
-      .select("id, received_back, is_dayuse")
+      .select("id, sent_by_hotel, received_back, is_dayuse")
       .eq("batch_id", (pending as any).source_batch_id)
       .eq("linen_item_id", (pending as any).linen_item_id)
-      .maybeSingle();
+      .order("is_dayuse", { ascending: true });
     if (itemError) throw new Error(itemError.message);
-    if (!item) throw new Error("Source batch item for pending record not found.");
+    if (!sourceItems || sourceItems.length === 0) {
+      throw new Error("Source batch item for pending record not found.");
+    }
 
     const qty = ensureNonNegativeInt((pending as any).pending_qty, "pending_qty");
-    const nextReceived = ensureNonNegativeInt((item as any).received_back, "received_back") + qty;
-    const { error: updateItemError } = await supabase
-      .from("laundry_batch_items")
-      .update({ received_back: nextReceived })
-      .eq("id", (item as any).id);
-    if (updateItemError) throw new Error(updateItemError.message);
+    const allocations = allocatePendingAcrossVariants(
+      (sourceItems as any[]).map((item) => ({
+        id: String(item.id),
+        sent_by_hotel: ensureNonNegativeInt(item.sent_by_hotel, "sent_by_hotel"),
+        received_back: ensureNonNegativeInt(item.received_back, "received_back"),
+        is_dayuse: Boolean(item.is_dayuse),
+      })),
+      qty
+    );
+
+    for (const allocation of allocations) {
+      const item = (sourceItems as any[]).find((row) => String(row.id) === allocation.id);
+      if (!item) throw new Error("Source batch item for pending allocation not found.");
+      const nextReceived = ensureNonNegativeInt(item.received_back, "received_back") + allocation.qty;
+      const { error: updateItemError } = await supabase
+        .from("laundry_batch_items")
+        .update({ received_back: nextReceived })
+        .eq("id", allocation.id);
+      if (updateItemError) throw new Error(updateItemError.message);
+
+      resolved.push({
+        pending_item_id: String((pending as any).id),
+        source_batch_id: String((pending as any).source_batch_id),
+        linen_item_id: Number((pending as any).linen_item_id),
+        qty: allocation.qty,
+        is_dayuse: allocation.is_dayuse,
+      });
+    }
 
     const { error: updatePendingError } = await supabase
       .from("laundry_pending_items")
@@ -209,13 +267,6 @@ export async function resolvePendingItems(
       .eq("id", (pending as any).id);
     if (updatePendingError) throw new Error(updatePendingError.message);
 
-    resolved.push({
-      pending_item_id: String((pending as any).id),
-      source_batch_id: String((pending as any).source_batch_id),
-      linen_item_id: Number((pending as any).linen_item_id),
-      qty,
-      is_dayuse: Boolean((item as any).is_dayuse),
-    });
   }
 
   await rebuildOpenPendingItemsForSourceBatches(supabase, [...affectedSourceBatchIds], {

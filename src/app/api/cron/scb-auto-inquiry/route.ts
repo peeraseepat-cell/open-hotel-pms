@@ -4,6 +4,7 @@ import { createServerSupabaseClient } from "@/lib/supabase/server";
 import { runScbInquiryForRequest } from "@/lib/scb/inquiry-runner";
 
 export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
 
 function timingSafeEqualStr(a: string, b: string): boolean {
   const left = Buffer.from(a);

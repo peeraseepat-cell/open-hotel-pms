@@ -84,11 +84,43 @@ export async function POST(request: NextRequest) {
     const rawText = await detectPassportTextFromBuffer(buffer);
     const parsed = parsePassportMrz(rawText);
     if (!parsed) {
-      throw new MobileCheckinError(
-        "Cannot parse MRZ fields. Retake a clearer photo of the passport MRZ area.",
-        422,
-        "MRZ_PARSE_FAILED"
-      );
+      // MRZ unreadable — but the photo IS already captured & uploaded. Never lose it:
+      // persist the scan row (bound to the reservation when known) with pool_status='ocr_failed'
+      // so the image stays linked and the FO can fill in the guest details manually.
+      const { data: failedRow, error: failedError } = await supabase
+        .from("passport_scans")
+        .insert({
+          reservation_id: reservationId,
+          guest_index: guestIndex,
+          image_path: objectPath,
+          ocr_raw: {
+            raw_text: rawText,
+            content_type: image.type || "image/jpeg",
+            size: buffer.length,
+          },
+          ocr_parsed: null,
+          match_confidence: null,
+          matched_reservation_id: reservationId,
+          pool_status: "ocr_failed",
+          created_by: auth.userId,
+        })
+        .select("id, image_path")
+        .single();
+
+      if (failedError) {
+        throw new MobileCheckinError(failedError.message, 500, "SCAN_INSERT_FAILED");
+      }
+
+      return NextResponse.json({
+        success: true,
+        data: {
+          scan_id: String(failedRow.id),
+          image_path: String(failedRow.image_path),
+          parsed: null,
+          mrz_failed: true,
+          message: "เก็บรูปพาสปอร์ตแล้ว แต่อ่าน MRZ ไม่ออก กรุณากรอกข้อมูลแขกเอง",
+        },
+      });
     }
 
     const confidence = computeMrzConfidence(parsed);
