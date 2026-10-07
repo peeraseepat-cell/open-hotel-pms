@@ -79,7 +79,7 @@ Supabase migrations live in [`supabase/migrations/`](./supabase/migrations). For
 
 This repository is a **public snapshot** (June 2026) plus maintenance updates. The production version keeps evolving privately: since the snapshot it has added, among others, maintenance jobs with defect reports from the maid's phone, reversible guest merge with undo, deep-clean review, a hands-on training mode, water-meter tracking, and a Thai/English UI switch. Security and core-correctness fixes from that work are backported here.
 
-The UI is mostly English with some Thai labels — it was built for a hotel in Thailand.
+The UI is mostly English with some Thai labels, We plan to update the new i18n Section soon.
 
 ## 📄 License
 
