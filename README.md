@@ -20,6 +20,8 @@ Hotel PMS software today is **expensive, rigid, and closed**:
 
 Open Hotel PMS is the counter-example. It's a complete system that already runs a real hotel's daily operations — built over **3+ months in close collaboration with AI** and released openly so **anyone can self-host, adapt, and extend it**. No per-room fees, no locked modules, no black box.
 
+> 🔐 **October 2026 maintenance update — if you run a fork, please update.** This release backports security hardening (API authorization, cron authentication, database grants/RLS), billing and tax-invoice correctness fixes, and a fix that makes a fresh `supabase start` apply all migrations. Crons refuse every call until their secret is set (`CRON_SECRET`, `CRON_BACKUP_SECRET`; see [Environment](#environment)).
+
 > ℹ️ This is a **sanitized public release**. Hotel-specific branding, logos, photos, and real contact data have been removed, and the seed room map / pricing in `supabase/seed.sql` is generic example data. Bring your own Supabase project, branding, and room configuration.
 
 ---
@@ -64,16 +66,20 @@ Copy `.env.example` to `.env.local` and provide your own keys:
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase anon (public) key |
 | `SUPABASE_SERVICE_ROLE_KEY` | Service-role key — **server-side only** |
 | `GOOGLE_VISION_API_KEY` | Passport OCR (optional) |
+| `CRON_SECRET` | Secret for the OTA-alarm, SCB-inquiry and linen-cleanup crons — unset = those crons refuse every call |
+| `CRON_BACKUP_SECRET` | Secret for the backup, offline-snapshot and UI-log-archive crons — unset = those crons refuse every call |
 
 > 🔒 Service-role and external API keys are read server-side only. Keep them out of version control.
 
 ### Database
 
-Supabase migrations live in [`supabase/migrations/`](./supabase/migrations) and can be applied with the Supabase CLI.
+Supabase migrations live in [`supabase/migrations/`](./supabase/migrations). For a local stack, `supabase start` applies all migrations and the generic seed.
 
 ## 🗺️ Status
 
-Production-grade and actively developed. Some advanced flows (room move, group check-in) are in active / stabilizing phases — see commit history.
+This repository is a **public snapshot** (June 2026) plus maintenance updates. The production version keeps evolving privately: since the snapshot it has added, among others, maintenance jobs with defect reports from the maid's phone, reversible guest merge with undo, deep-clean review, a hands-on training mode, water-meter tracking, and a Thai/English UI switch. Security and core-correctness fixes from that work are backported here.
+
+The UI is mostly English with some Thai labels — it was built for a hotel in Thailand.
 
 ## 📄 License
 
