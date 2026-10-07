@@ -1,6 +1,6 @@
 import { normalizeAuditSource, toBangkokDateString } from "@/lib/audit-utils";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
-import { getAuthenticatedUser } from "@/lib/server-auth";
+import { requireStaffAuth } from "@/lib/server-auth";
 import { syncStaffFromProfiles } from "@/lib/staff-sync";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
@@ -81,9 +81,11 @@ export async function PATCH(
 ) {
   try {
     const supabase = createServerSupabaseClient();
-    const user = await getAuthenticatedUser(supabase, request);
-    // Legacy PMS mode
-    void user;
+    // Management mutation: renaming/deactivating staff cascades hotel-wide via
+    // syncRenamedAssignments. Gate to admin/supervisor — the tier /api/staff/invite enforces.
+    const auth = await requireStaffAuth(supabase, request, { allowRoles: ["admin", "supervisor"] });
+    if (auth.error) return auth.error;
+    const user = auth.user;
 
     try {
       await syncStaffFromProfiles(supabase);

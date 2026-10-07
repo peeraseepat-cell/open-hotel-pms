@@ -1,4 +1,5 @@
 import { createServerSupabaseClient } from "@/lib/supabase/server";
+import { buildQuotedIlikeOrFilter } from "@/lib/postgrest-escape";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
@@ -62,8 +63,7 @@ export async function GET(request: NextRequest) {
     }
 
     if (search && search.length > 0) {
-      const term = `%${search}%`;
-      query = query.or(`name.ilike.${term},phone.ilike.${term}`);
+      query = query.or(buildQuotedIlikeOrFilter(["name", "phone"], search));
     }
 
     if (sort === "name") {

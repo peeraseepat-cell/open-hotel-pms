@@ -1,5 +1,6 @@
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 import { resolveBusinessDate } from "@/lib/folio-fees";
+import { requireStaffAuth } from "@/lib/server-auth";
 import {
     summarizeRevenueRange,
     type RevenueDayuseRow,
@@ -50,6 +51,9 @@ async function fetchRevenueRows<T>(
 export async function GET(request: NextRequest) {
     try {
         const supabase = createServerSupabaseClient();
+        const auth = await requireStaffAuth(supabase, request);
+        if (auth.error) return auth.error;
+
         const sp = request.nextUrl.searchParams;
 
         const fallbackDate = toLocalDate(new Date());

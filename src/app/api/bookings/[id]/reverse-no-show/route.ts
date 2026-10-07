@@ -3,6 +3,7 @@ import { getNightAuditSettings } from "@/lib/night-audit";
 import { assertRoomAvailableForDateRange, PlannedRoomMoveError } from "@/lib/planned-room-moves";
 import { syncBookingGroupStatusById } from "@/lib/booking-group-status";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
+import { requireStaffAuth } from "@/lib/server-auth";
 import { listNights } from "@/lib/dates";
 import { normalizeAuditSource } from "@/lib/audit-utils";
 import { NextRequest, NextResponse } from "next/server";
@@ -35,7 +36,7 @@ function buildRefundMatchKey(paymentId: string) {
 }
 
 export async function POST(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: { id: string } }
 ) {
   try {
@@ -45,6 +46,9 @@ export async function POST(
     }
 
     const supabase = createServerSupabaseClient();
+    const auth = await requireStaffAuth(supabase, request, { allowRoles: ["admin", "supervisor", "frontdesk"] });
+    if (auth.error) return auth.error;
+
     const { businessDate } = await getNightAuditSettings(supabase);
     await assertBusinessDayOpen(supabase, businessDate);
 

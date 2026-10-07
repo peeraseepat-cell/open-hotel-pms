@@ -1,6 +1,6 @@
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 import { applyAlertSettingsToHotelSettings, readAlertSettings, updateAlertSettings } from "@/lib/alerts/service";
-import { getAuthenticatedUser } from "@/lib/server-auth";
+import { requireStaffAuth } from "@/lib/server-auth";
 import { normalizeTransportAlertLeadMinutes } from "@/lib/transport-alert-settings";
 import { NextRequest, NextResponse } from "next/server";
 import { unstable_noStore as noStore } from "next/cache";
@@ -113,6 +113,10 @@ export async function GET() {
 export async function PUT(request: NextRequest) {
     try {
         const supabase = createServerSupabaseClient();
+        // hotel_settings PUT changes hotel-wide config (fees, check-in/out times, identity-verification
+        // alerts). Gate to admin/supervisor BEFORE any write. Return 401/403 before the upsert.
+        const auth = await requireStaffAuth(supabase, request, { allowRoles: ["admin", "supervisor"] });
+        if (auth.error) return auth.error;
         const body = await request.json();
         const alertPatch = {
             start_time: "alert_start_time" in body ? String(body.alert_start_time ?? "") : undefined,
@@ -186,8 +190,7 @@ export async function PUT(request: NextRequest) {
 
         if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-        const actorUser = await getAuthenticatedUser(supabase, request);
-        const actorUserId = actorUser?.id ?? null;
+        const actorUserId = auth.user.id;
         if (actorUserId && Object.values(alertPatch).some((value) => value !== undefined)) {
             await updateAlertSettings(supabase, actorUserId, alertPatch);
         }

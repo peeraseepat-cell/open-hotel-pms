@@ -79,8 +79,12 @@ export default function OfflinePage() {
 
   const isPaired = Boolean(deviceToken);
 
-  const refreshPinCache = async () => {
-    const config = await readJson<BackupConfigPublic>(await fetch("/api/backup/config", { cache: "no-store" }));
+  const refreshPinCache = async (tokenOverride?: string | null) => {
+    const tokenForConfig = tokenOverride ?? deviceToken;
+    const headers = tokenForConfig ? { "x-offline-device-token": tokenForConfig } : undefined;
+    const config = await readJson<BackupConfigPublic>(
+      await fetch("/api/backup/config", { cache: "no-store", headers })
+    );
     if (typeof window !== "undefined" && config.pin_hash) {
       window.localStorage.setItem(PIN_HASH_CACHE_KEY, config.pin_hash);
     }
@@ -120,7 +124,10 @@ export default function OfflinePage() {
 
     (async () => {
       try {
-        const config = await readJson<BackupConfigPublic>(await fetch("/api/backup/config", { cache: "no-store" }));
+        const headers = deviceToken ? { "x-offline-device-token": deviceToken } : undefined;
+        const config = await readJson<BackupConfigPublic>(
+          await fetch("/api/backup/config", { cache: "no-store", headers })
+        );
         if (cancelled) return;
         if (typeof window !== "undefined" && config.pin_hash) {
           window.localStorage.setItem(PIN_HASH_CACHE_KEY, config.pin_hash);
@@ -221,7 +228,7 @@ export default function OfflinePage() {
       setRegisteredDeviceName(data.device_name);
       setPairingToken("");
       setPairingDeviceName(data.device_name);
-      await refreshPinCache();
+      await refreshPinCache(data.device_token);
       setSyncMessage(`Device paired as ${data.device_name}. Enter the offline PIN to continue.`);
     } catch (pairError) {
       setError(pairError instanceof Error ? pairError.message : "Failed to pair this device.");

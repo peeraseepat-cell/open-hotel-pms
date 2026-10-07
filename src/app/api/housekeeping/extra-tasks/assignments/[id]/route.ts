@@ -1,5 +1,6 @@
 import { normalizeAuditSource, toBangkokDateString } from "@/lib/audit-utils";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
+import { requireStaffAuth } from "@/lib/server-auth";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
@@ -43,6 +44,9 @@ export async function PUT(
     }
 
     const supabase = createServerSupabaseClient();
+    // Moving or cancelling a card is a supervisor action, not a maid action.
+    const auth = await requireStaffAuth(supabase, request, { denyRoles: ["owner", "maid"] });
+    if (auth.error) return auth.error;
     const assignmentId = parsedParams.data.id;
 
     const { data: existing, error: existingError } = await supabase
@@ -104,7 +108,7 @@ export async function PUT(
 }
 
 export async function DELETE(
-  _request: NextRequest,
+  request: NextRequest,
   context: { params: { id: string } }
 ) {
   try {
@@ -117,6 +121,9 @@ export async function DELETE(
     }
 
     const supabase = createServerSupabaseClient();
+    // Moving or cancelling a card is a supervisor action, not a maid action.
+    const auth = await requireStaffAuth(supabase, request, { denyRoles: ["owner", "maid"] });
+    if (auth.error) return auth.error;
     const assignmentId = parsedParams.data.id;
 
     const { data: existing, error: existingError } = await supabase

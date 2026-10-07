@@ -1352,8 +1352,33 @@ export async function authorizeOfflineSnapshotRequest(
   return "pin";
 }
 
+export async function canReadBackupConfigPinHash(
+  supabase: SupabaseServerClient,
+  request: NextRequest
+): Promise<boolean> {
+  const user = await getAuthenticatedUser(supabase, request);
+  if (user) {
+    const role = await getUserRole(supabase, user.id);
+    if (role === "admin") return true;
+  }
+
+  const headerDeviceToken = String(request.headers.get("x-offline-device-token") ?? "").trim();
+  const queryDeviceToken = String(request.nextUrl.searchParams.get("device_token") ?? "").trim();
+  const rawDeviceToken = headerDeviceToken || queryDeviceToken;
+  if (!rawDeviceToken) return false;
+
+  try {
+    await verifyTrustedDeviceToken(supabase, rawDeviceToken);
+    return true;
+  } catch (error) {
+    if (error instanceof BackupHttpError) return false;
+    throw error;
+  }
+}
+
 export async function getBackupConfigPublicPayload(
-  supabase: SupabaseServerClient
+  supabase: SupabaseServerClient,
+  options: { includePinHash?: boolean } = {}
 ): Promise<{
   retention_days: number;
   r2_bucket: string;
@@ -1367,7 +1392,7 @@ export async function getBackupConfigPublicPayload(
     retention_days: config.retention_days,
     r2_bucket: config.r2_bucket,
     updated_at: config.updated_at,
-    pin_hash: config.offline_pin,
+    pin_hash: options.includePinHash ? config.offline_pin : null,
     has_pin: Boolean(config.offline_pin),
     device_pairing_required: true,
   };

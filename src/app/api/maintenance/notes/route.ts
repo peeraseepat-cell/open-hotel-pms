@@ -1,4 +1,5 @@
-import { createServerSupabaseClient } from "@/lib/supabase/server";
+import { maintenanceApiError, requireMaintenanceAccess } from "@/lib/maintenance/api-auth";
+import { normalizeAuditSource, toBangkokDateString } from "@/lib/audit-utils";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
@@ -15,6 +16,7 @@ const createNoteSchema = z.object({
 
 export async function GET(request: NextRequest) {
   try {
+    const { supabase } = await requireMaintenanceAccess(request, "read");
     const parsedQuery = querySchema.safeParse({
       room_id: request.nextUrl.searchParams.get("room_id") ?? undefined,
       resolved: request.nextUrl.searchParams.get("resolved") ?? undefined,
@@ -27,7 +29,6 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const supabase = createServerSupabaseClient();
     let query = supabase
       .from("maintenance_notes")
       .select("id, room_id, task_id, note, created_at, is_resolved, resolved_at")
@@ -53,13 +54,15 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({ success: true, notes: data ?? [] });
   } catch (err) {
-    console.error("maintenance/notes GET unexpected", err);
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    const { status, message } = maintenanceApiError(err);
+    if (status >= 500) console.error("maintenance/notes GET unexpected", err);
+    return NextResponse.json({ error: message }, { status });
   }
 }
 
 export async function POST(request: NextRequest) {
   try {
+    const { supabase, actor } = await requireMaintenanceAccess(request, "write");
     const body = await request.json().catch(() => null);
     const parsedBody = createNoteSchema.safeParse(body);
 
@@ -71,7 +74,6 @@ export async function POST(request: NextRequest) {
     }
 
     const payload = parsedBody.data;
-    const supabase = createServerSupabaseClient();
 
     const { data: room, error: roomError } = await supabase
       .from("rooms")
@@ -103,9 +105,32 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
 
+    // maintenance_notes carries no author column, so the actor is recorded here.
+    // Audit is a record, not a gate — a failed write must not fail the mutation.
+    const { error: auditError } = await supabase.from("audit_logs").insert({
+      action: "maintenance_note_created",
+      entity_type: "maintenance_notes",
+      entity_id: String(data?.id ?? ""),
+      after_json: {
+        room_id: payload.room_id,
+        task_id: payload.task_id,
+        note: payload.note,
+        created_by_name: actor.name,
+        actor_role: actor.role,
+      },
+      change_reason: "maintenance note created",
+      actor_user_id: actor.userId,
+      business_date: toBangkokDateString(),
+      source: normalizeAuditSource("manual"),
+    });
+    if (auditError) {
+      console.error("maintenance/notes POST audit log failed", auditError);
+    }
+
     return NextResponse.json({ success: true, note: data }, { status: 201 });
   } catch (err) {
-    console.error("maintenance/notes POST unexpected", err);
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    const { status, message } = maintenanceApiError(err);
+    if (status >= 500) console.error("maintenance/notes POST unexpected", err);
+    return NextResponse.json({ error: message }, { status });
   }
 }

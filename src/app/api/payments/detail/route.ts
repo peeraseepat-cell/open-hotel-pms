@@ -1,4 +1,5 @@
 import { createServerSupabaseClient } from "@/lib/supabase/server";
+import { requireStaffAuth } from "@/lib/server-auth";
 import {
   PaymentReportExcludedReason,
   PaymentReportRow,
@@ -90,6 +91,9 @@ export async function GET(request: NextRequest) {
     }
 
     const supabase = createServerSupabaseClient();
+    const auth = await requireStaffAuth(supabase, request);
+    if (auth.error) return auth.error;
+
     const { resolveBusinessDate } = await import("@/lib/folio-fees");
     const fallbackDate = toBangkokDateString();
     const businessDate = await resolveBusinessDate(supabase, fallbackDate);

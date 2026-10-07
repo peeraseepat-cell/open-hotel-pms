@@ -1,5 +1,5 @@
 import type { RateSingleEditRequest, RateSingleEditResponse } from "@/lib/rates/types";
-import { getAuthenticatedUser } from "@/lib/server-auth";
+import { requireStaffAuth } from "@/lib/server-auth";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 import { verifyRateOverrideToken } from "@/lib/admin/pin";
 import { NextRequest, NextResponse } from "next/server";
@@ -60,6 +60,8 @@ async function loadMinRateFloor(supabase: ReturnType<typeof createServerSupabase
 export async function POST(request: NextRequest) {
   try {
     const supabase = createServerSupabaseClient();
+    const auth = await requireStaffAuth(supabase, request, { allowRoles: ["admin", "supervisor"] });
+    if (auth.error) return auth.error;
     const body = (await request.json().catch(() => null)) as RateSingleEditRequest | null;
 
     const mode = body?.mode === "type" ? "type" : "room";
@@ -75,7 +77,6 @@ export async function POST(request: NextRequest) {
       return jsonError({ success: false, error: "Price cannot be negative." }, 400);
     }
 
-    const actor = await getAuthenticatedUser(supabase, request);
     let resolvedRoomTypeId = roomTypeId;
     let roomIds: string[] = [];
 
@@ -100,7 +101,7 @@ export async function POST(request: NextRequest) {
     }
 
     const floor = await loadMinRateFloor(supabase, resolvedRoomTypeId);
-    const hasOverride = verifyRateOverrideToken(body?.override_token, actor?.id ?? null);
+    const hasOverride = verifyRateOverrideToken(body?.override_token, auth.user.id);
     if (floor != null && price < floor && !hasOverride) {
       return jsonError(
         {
@@ -118,7 +119,7 @@ export async function POST(request: NextRequest) {
       room_id: id,
       stay_date: date,
       price,
-      updated_by: actor?.id ?? null,
+      updated_by: auth.user.id,
       updated_at: nowIso,
     }));
 

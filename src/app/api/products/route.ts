@@ -1,4 +1,5 @@
 import { createServerSupabaseClient } from "@/lib/supabase/server";
+import { buildQuotedIlikeOrFilter } from "@/lib/postgrest-escape";
 import { assertAdminOrSupervisor, getAuthenticatedUser } from "@/lib/server-auth";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
@@ -70,7 +71,7 @@ export async function GET(request: NextRequest) {
     if (for_sale === "true") query = query.not("sale_price", "is", null);
     if (for_sale === "false") query = query.is("sale_price", null);
     if (q && q.length > 0) {
-      query = query.or(`name.ilike.%${q}%,sku.ilike.%${q}%`);
+      query = query.or(buildQuotedIlikeOrFilter(["name", "sku"], q));
     }
 
     const initial = await query;

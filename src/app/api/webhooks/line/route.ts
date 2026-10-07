@@ -10,7 +10,7 @@ export const fetchCache = "force-no-store";
 type LineEvent = {
   type?: string;
   replyToken?: string;
-  source?: { userId?: string };
+  source?: { type?: string; userId?: string; groupId?: string; roomId?: string };
   message?: { type?: string; text?: string };
 };
 
@@ -438,6 +438,11 @@ export async function POST(request: NextRequest) {
     for (const event of events) {
       let replyToken = event.replyToken ? String(event.replyToken) : "";
       try {
+        // The bot answers only in a 1:1 chat. This must stay the first statement in this try,
+        // so the exception reply below is also unreachable for a group or room source.
+        // A missing source.type counts as non-user on purpose: silence is the safe direction.
+        if (event.source?.type !== "user") continue;
+
         if (event.type !== "message" || event.message?.type !== "text") continue;
         const text = String(event.message.text ?? "").trim();
         const lineUserId = event.source?.userId ? String(event.source.userId) : "";
@@ -548,8 +553,10 @@ export async function POST(request: NextRequest) {
         );
       } catch (eventErr) {
         console.error("line webhook event handler error", eventErr);
-        const msg = eventErr instanceof Error ? eventErr.message : String(eventErr);
-        await replyLineText(replyToken, `[DEBUG exception] ${msg}`).catch(() => undefined);
+        if (event.source?.type === "user") {
+          const msg = eventErr instanceof Error ? eventErr.message : String(eventErr);
+          await replyLineText(replyToken, `[DEBUG exception] ${msg}`).catch(() => undefined);
+        }
       }
     }
 

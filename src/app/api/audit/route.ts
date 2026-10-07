@@ -4,6 +4,7 @@ import {
   normalizeAuditSource,
   toBangkokDateString,
 } from "@/lib/audit-utils";
+import { buildQuotedIlikeOrFilter } from "@/lib/postgrest-escape";
 import { assertAdminOrSupervisor, getAuthenticatedUser } from "@/lib/server-auth";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 import { NextRequest, NextResponse } from "next/server";
@@ -119,16 +120,6 @@ function shapeAuditMetadataRows(rows: any[]): AuditFilterSourceRow[] {
   }));
 }
 
-// Escape user input for use inside a PostgREST .or() ilike quoted value while
-// preserving literal substring semantics (parity with /api/audit/export).
-function escapeOrValue(value: string): string {
-  const ilikeEscaped = value
-    .replace(/\\/g, "\\\\")
-    .replace(/%/g, "\\%")
-    .replace(/_/g, "\\_");
-  return ilikeEscaped.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-}
-
 export async function GET(request: NextRequest) {
   try {
     const supabase = createServerSupabaseClient();
@@ -183,10 +174,7 @@ export async function GET(request: NextRequest) {
     const hasSearch = rawSearch.length > 0;
     let rowsQuery = buildBaseQuery();
     if (hasSearch) {
-      const searchValue = escapeOrValue(rawSearch);
-      rowsQuery = rowsQuery.or(
-        `entity_id.ilike."%${searchValue}%",action.ilike."%${searchValue}%",note.ilike."%${searchValue}%"`
-      );
+      rowsQuery = rowsQuery.or(buildQuotedIlikeOrFilter(["entity_id", "action", "note"], rawSearch));
     }
 
     const { data, error } = await rowsQuery.limit(MAX_SCAN_ROWS);

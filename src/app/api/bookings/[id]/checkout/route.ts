@@ -11,6 +11,7 @@ import { formatMoney, fromSatang, toSatang } from "@/lib/money";
 import { computeReservationDiscountAmount } from "@/lib/reservation-visible-total";
 import { syncDynamicRoomLinksForReservation } from "@/lib/logbook-api";
 import { syncBookingGroupStatusById } from "@/lib/booking-group-status";
+import { requireStaffAuth } from "@/lib/server-auth";
 import { normalizeAuditSource } from "@/lib/audit-utils";
 import { markRoomDirtyTask } from "@/lib/hk-dirty";
 import { markReservationVehiclesCheckedOut } from "@/lib/vehicles";
@@ -383,6 +384,9 @@ export async function POST(
 ) {
     try {
         const supabase = createServerSupabaseClient();
+        const auth = await requireStaffAuth(supabase, request, { allowRoles: ["admin", "supervisor", "frontdesk"] });
+        if (auth.error) return auth.error;
+
         const reservationId = params.id;
         const body = await request.json().catch(() => ({}));
 

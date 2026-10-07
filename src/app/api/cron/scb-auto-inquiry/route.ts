@@ -1,22 +1,31 @@
+import crypto from "crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 import { runScbInquiryForRequest } from "@/lib/scb/inquiry-runner";
 
 export const dynamic = "force-dynamic";
 
+function timingSafeEqualStr(a: string, b: string): boolean {
+  const left = Buffer.from(a);
+  const right = Buffer.from(b);
+  if (left.length !== right.length) return false;
+  return crypto.timingSafeEqual(left, right);
+}
+
 function isAuthorizedCronRequest(request: NextRequest): boolean {
-  const bearer = request.headers.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1] ?? null;
+  // Middleware treats /api/cron as public, so this is the only wall. Authorize solely on the
+  // shared secret (bearer or ?token=), constant-time, fail-closed when unset. The former
+  // x-vercel-cron header / vercel-cron User-Agent fallbacks were client-spoofable — removed.
   const cronSecret = String(process.env.SCB_AUTO_INQUIRY_CRON_SECRET ?? process.env.CRON_SECRET ?? "").trim();
-  if (cronSecret && bearer === cronSecret) return true;
+  if (!cronSecret) return false;
+
+  const bearer = request.headers.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1]?.trim() ?? "";
+  if (bearer && timingSafeEqualStr(bearer, cronSecret)) return true;
 
   const queryToken = String(request.nextUrl.searchParams.get("token") ?? "").trim();
-  if (cronSecret && queryToken === cronSecret) return true;
+  if (queryToken && timingSafeEqualStr(queryToken, cronSecret)) return true;
 
-  const cronHeader = request.headers.get("x-vercel-cron");
-  if (cronHeader && cronHeader.trim() === "1") return true;
-
-  const userAgent = String(request.headers.get("user-agent") ?? "").toLowerCase();
-  return userAgent.includes("vercel-cron");
+  return false;
 }
 
 export async function GET(request: NextRequest) {

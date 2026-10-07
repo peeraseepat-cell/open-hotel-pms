@@ -1,4 +1,5 @@
 import { createServerSupabaseClient } from "@/lib/supabase/server";
+import { requireStaffAuth } from "@/lib/server-auth";
 import {
   PAYMENT_REPORT_CATEGORIES,
   PAYMENT_REPORT_METHOD_KEYS,
@@ -75,6 +76,9 @@ export async function GET(request: NextRequest) {
   noStore();
   try {
     const supabase = createServerSupabaseClient();
+    const auth = await requireStaffAuth(supabase, request);
+    if (auth.error) return auth.error;
+
     const { searchParams } = new URL(request.url);
 
     const startDate = (searchParams.get("start") ?? "").trim();

@@ -16,16 +16,11 @@ function isMissingRelationError(message?: string | null) {
 function isAuthorizedCronRequest(request: NextRequest): boolean {
   const bearer = request.headers.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1] ?? null;
   const cronSecret = String(process.env.OTA_ALARM_CRON_SECRET ?? process.env.CRON_SECRET ?? "").trim();
-  if (cronSecret && bearer === cronSecret) return true;
+  if (!cronSecret) return false;
+  if (bearer === cronSecret) return true;
 
   const queryToken = String(request.nextUrl.searchParams.get("token") ?? "").trim();
-  if (cronSecret && queryToken === cronSecret) return true;
-
-  const cronHeader = request.headers.get("x-vercel-cron");
-  if (cronHeader && cronHeader.trim() === "1") return true;
-
-  const userAgent = String(request.headers.get("user-agent") ?? "").toLowerCase();
-  return userAgent.includes("vercel-cron");
+  return queryToken === cronSecret;
 }
 
 export async function GET(request: NextRequest) {

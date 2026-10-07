@@ -1,4 +1,4 @@
-import { createServerSupabaseClient } from "@/lib/supabase/server";
+import { maintenanceApiError, requireMaintenanceAccess } from "@/lib/maintenance/api-auth";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
@@ -24,9 +24,9 @@ const createTaskSchema = z
     }
   });
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
-    const supabase = createServerSupabaseClient();
+    const { supabase } = await requireMaintenanceAccess(request, "read");
     const { data, error } = await supabase
       .from("maintenance_tasks")
       .select(
@@ -42,13 +42,15 @@ export async function GET() {
 
     return NextResponse.json({ success: true, tasks: data ?? [] });
   } catch (err) {
-    console.error("maintenance/tasks GET unexpected", err);
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    const { status, message } = maintenanceApiError(err);
+    if (status >= 500) console.error("maintenance/tasks GET unexpected", err);
+    return NextResponse.json({ error: message }, { status });
   }
 }
 
 export async function POST(request: NextRequest) {
   try {
+    const { supabase } = await requireMaintenanceAccess(request, "write");
     const body = await request.json().catch(() => null);
     const parsedBody = createTaskSchema.safeParse(body);
 
@@ -60,7 +62,6 @@ export async function POST(request: NextRequest) {
     }
 
     const payload = parsedBody.data;
-    const supabase = createServerSupabaseClient();
 
     const insertPayload = {
       name: payload.name,
@@ -97,7 +98,8 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ success: true, task: data }, { status: 201 });
   } catch (err) {
-    console.error("maintenance/tasks POST unexpected", err);
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    const { status, message } = maintenanceApiError(err);
+    if (status >= 500) console.error("maintenance/tasks POST unexpected", err);
+    return NextResponse.json({ error: message }, { status });
   }
 }

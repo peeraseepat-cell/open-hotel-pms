@@ -1,4 +1,5 @@
 import { resolveBusinessDate, toLocalDate } from "@/lib/folio-fees";
+import { buildQuotedIlikeOrFilter } from "@/lib/postgrest-escape";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
@@ -236,7 +237,7 @@ export async function GET(request: NextRequest) {
     if (order_type) query = query.eq("order_type", order_type);
     if (reservation_id) query = query.eq("reservation_id", reservation_id);
     if (q && q.length > 0) {
-      query = query.or(`order_number.ilike.%${q}%,guest_name.ilike.%${q}%,note.ilike.%${q}%`);
+      query = query.or(buildQuotedIlikeOrFilter(["order_number", "guest_name", "note"], q));
     }
 
     const { data, error, count } = await query;

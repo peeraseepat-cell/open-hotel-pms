@@ -100,10 +100,13 @@ export default function MaintenanceTasksPage() {
             const res = await fetch(`/api/maintenance/tasks/${deleteTarget.id}`, { method: "DELETE" });
             const data = await readJsonSafe(res);
             if (!res.ok || data.success === false) throw new Error(data.error || "Delete failed");
-            toast({ title: "Success", description: `Deleted ${deleteTarget.name}` });
-            setTasks(tasks.filter(t => t.id !== deleteTarget.id));
+            toast({ title: "Success", description: `Deactivated ${deleteTarget.name}` });
+            // Retire in place — mirrors handleToggleActive. Filtering the row out here
+            // would contradict the server, which keeps the task (is_active=false) so it
+            // stays reactivable; the row would silently return on the next refresh.
+            setTasks(tasks.map(t => t.id === deleteTarget.id ? { ...t, is_active: false } : t));
         } catch (error: any) {
-            toast({ title: "Error", description: error?.message || "Failed to delete", variant: "destructive" });
+            toast({ title: "Error", description: error?.message || "Failed to deactivate", variant: "destructive" });
         } finally { setProcessingId(null); setDeleteTarget(null); }
     };
 
@@ -269,19 +272,19 @@ export default function MaintenanceTasksPage() {
                 </div>
             )}
 
-            {/* Delete Confirmation Modal */}
+            {/* Deactivate Confirmation Modal */}
             <Dialog open={!!deleteTarget} onOpenChange={(open) => !open && setDeleteTarget(null)}>
                 <DialogContent className="max-w-sm">
                     <DialogHeader>
-                        <DialogTitle>Delete Task</DialogTitle>
+                        <DialogTitle>Deactivate Task</DialogTitle>
                         <DialogDescription>
-                            Are you sure you want to delete &ldquo;{deleteTarget?.name}&rdquo;? All related history and notes will be permanently removed.
+                            Deactivate &ldquo;{deleteTarget?.name}&rdquo;? It stops appearing on the board and can no longer be assigned. Its history and notes are kept, and you can reactivate it from this list.
                         </DialogDescription>
                     </DialogHeader>
                     <DialogFooter className="gap-2">
                         <Button variant="outline" onClick={() => setDeleteTarget(null)} className="h-9">Cancel</Button>
                         <Button className="h-9 bg-red-600 hover:bg-red-700" onClick={handleConfirmDelete} disabled={processingId !== null}>
-                            {processingId ? "Deleting..." : "Delete"}
+                            {processingId ? "Deactivating..." : "Deactivate"}
                         </Button>
                     </DialogFooter>
                 </DialogContent>

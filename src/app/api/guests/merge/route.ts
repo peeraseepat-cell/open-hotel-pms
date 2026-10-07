@@ -1,5 +1,6 @@
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 import { listGuestProfileBookingNames, replaceGuestProfileBookingNames } from "@/lib/guest-booking-names";
+import { requireStaffAuth } from "@/lib/server-auth";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
@@ -37,6 +38,9 @@ export async function POST(request: NextRequest) {
         }
 
         const supabase = createServerSupabaseClient();
+        const auth = await requireStaffAuth(supabase, request, { allowRoles: ["admin", "supervisor", "frontdesk"] });
+        if (auth.error) return auth.error;
+
         const [masterBookingNames, sourceBookingNames] = await Promise.all([
             listGuestProfileBookingNames(supabase as any, master_id),
             listGuestProfileBookingNames(supabase as any, source_id),

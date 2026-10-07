@@ -1,4 +1,4 @@
-import { createServerSupabaseClient } from "@/lib/supabase/server";
+import { maintenanceApiError, requireMaintenanceAccess } from "@/lib/maintenance/api-auth";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
@@ -61,6 +61,7 @@ function isRenovationRoom(meta: { is_sellable: boolean; closure_reason: string |
 
 export async function GET(request: NextRequest) {
   try {
+    const { supabase } = await requireMaintenanceAccess(request, "read");
     const parsedQuery = querySchema.safeParse({
       task_id: request.nextUrl.searchParams.get("task_id") ?? undefined,
       include_renovation: request.nextUrl.searchParams.get("include_renovation") ?? undefined,
@@ -73,7 +74,6 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const supabase = createServerSupabaseClient();
     const { data, error } = await supabase.rpc("get_room_maintenance_status");
 
     if (error) {
@@ -229,7 +229,8 @@ export async function GET(request: NextRequest) {
       },
     });
   } catch (err) {
-    console.error("maintenance/status GET unexpected", err);
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    const { status, message } = maintenanceApiError(err);
+    if (status >= 500) console.error("maintenance/status GET unexpected", err);
+    return NextResponse.json({ error: message }, { status });
   }
 }
