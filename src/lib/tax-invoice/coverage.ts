@@ -287,6 +287,28 @@ export function prepareCoverageLineItems(
   };
 }
 
+
+/**
+ * Same remaining-balance semantics as prepareCoverageLineItems for "balance":
+ * coverage is complete when already-covered satang >= full-net satang (and full net > 0).
+ * A prepayment that covers the full discounted net leaves remaining = 0, so balance
+ * cannot be issued — Pending must treat that the same as standard/balance coverage.
+ */
+export function isCoverageFullySatisfied(
+  alreadyCoveredAmount: unknown,
+  fullNetTotal: unknown
+): boolean {
+  const fullSatang = positiveSatang(fullNetTotal);
+  if (fullSatang <= 0) return false;
+  return positiveSatang(alreadyCoveredAmount) >= fullSatang;
+}
+
+/** Sum coverage amounts using the same satang rounding as prepareCoverageLineItems. */
+export function sumCoverageAmounts(amounts: readonly unknown[]): number {
+  const sumSatang = amounts.reduce<number>((sum, amount) => sum + positiveSatang(amount), 0);
+  return fromSatang(sumSatang);
+}
+
 export function prepareEditedCoverageLineItems(
   lineItems: TaxInvoiceLineItem[],
   input: CoverageInput

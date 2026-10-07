@@ -1,3 +1,4 @@
+import { fetchAllRowsComplete } from "@/lib/complete-fetch";
 import { getAuthenticatedUser } from "@/lib/server-auth";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 import {
@@ -196,15 +197,25 @@ async function canReuseInvoiceNumber(
   const currentInvoiceNo = strOrNull(invoice.invoice_no);
   if (!currentInvoiceNo || invoice.status !== "issued") return false;
 
-  const { data, error } = await supabase
-    .from("invoices")
-    .select("id, invoice_no")
-    .eq("status", "issued")
-    .not("invoice_no", "is", null)
-    .limit(5000);
-
-  if (error) {
-    throw new TaxInvoiceError(error.message, 500);
+  // The JS numeric sort below is deliberately kept instead of an
+  // `ORDER BY invoice_no DESC LIMIT 1`: invoice_no is text with a
+  // variable-width sequence (next_invoice_no => 'IV' || YY || LPAD(seq, max(3,
+  // len(seq)))), so text collation ranks IV69999 above IV691000 and would pick
+  // the wrong "latest" once a year-series passes 999. What was broken here was
+  // the truncated READ, not the comparison.
+  let data: Array<{ id: string; invoice_no: string | null }>;
+  try {
+    data = await fetchAllRowsComplete<{ id: string; invoice_no: string | null }>(
+      () =>
+        supabase
+          .from("invoices")
+          .select("id, invoice_no", { count: "exact" })
+          .eq("status", "issued")
+          .not("invoice_no", "is", null),
+      { label: "issued invoice numbers" }
+    );
+  } catch (error) {
+    throw new TaxInvoiceError(error instanceof Error ? error.message : String(error), 500);
   }
 
   const latest = (data ?? [])

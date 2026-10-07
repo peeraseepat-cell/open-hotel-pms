@@ -1,6 +1,7 @@
 import {
   MobileCheckinError,
   MobileGuestInfoInput,
+  type MobileAccompanyingInput,
   getBusinessDate,
   requireMobileCheckinAuth,
   resolvePrimaryGuestProfile,
@@ -41,10 +42,16 @@ export async function POST(request: NextRequest) {
     }
 
     const target = String(formData.get("target") ?? "main").trim(); // "main" | "accompanying"
-    const guestIndexRaw = Number(formData.get("guest_index") ?? 0);
-    const guestIndex = Number.isFinite(guestIndexRaw) && guestIndexRaw >= 0
+    const requestedGuestIndex = formData.get("guest_index");
+    const guestIndexRaw = Number(requestedGuestIndex ?? 0);
+    let guestIndex = Number.isFinite(guestIndexRaw) && guestIndexRaw >= 0
       ? Math.min(9, Math.trunc(guestIndexRaw))
       : 0;
+
+    if (target !== "main" && requestedGuestIndex !== null &&
+        (!Number.isInteger(guestIndexRaw) || guestIndexRaw < 1 || guestIndexRaw > 3)) {
+      throw new MobileCheckinError("Accompanying guest_index must be an integer from 1 to 3.", 400, "INVALID_GUEST_INDEX");
+    }
 
     // Validate reservation exists
     const { data: reservation, error: reservationError } = await supabase
@@ -148,27 +155,50 @@ export async function POST(request: NextRequest) {
     } else {
       // Fill accompanying guest — add/update in reservation_guests
       // Fetch existing accompanying guests first
-      const { data: existingParty } = await supabase
+      const { data: existingParty, error: partyError } = await supabase
         .from("reservation_guests")
         .select("id, guest_profile_id, display_order")
         .eq("reservation_id", reservationId)
         .eq("role", "accompanying")
         .order("display_order", { ascending: true });
 
+      if (partyError) throw new MobileCheckinError(partyError.message, 500, "ACCOMPANY_READ_FAILED");
       const existingAccom = existingParty ?? [];
+      const occupiedIndexes = new Set<number>();
+      for (const member of existingAccom) {
+        const index = Number(member.display_order) - 1;
+        if (!Number.isInteger(index) || index < 1 || index > 3 || occupiedIndexes.has(index)) {
+          throw new MobileCheckinError("Existing accompanying guest slots are invalid.", 409, "ACCOMPANY_SLOT_INVALID");
+        }
+        occupiedIndexes.add(index);
+      }
+      if (requestedGuestIndex !== null && occupiedIndexes.has(guestIndexRaw)) {
+        throw new MobileCheckinError("ช่องผู้เข้าพักนี้มีผู้ใช้อยู่แล้ว กรุณาโหลดหน้าใหม่", 409, "ACCOMPANY_SLOT_OCCUPIED");
+      }
+      const nextIndex = requestedGuestIndex !== null ? guestIndexRaw
+        : [1, 2, 3].find((index) => !occupiedIndexes.has(index));
+      if (nextIndex === undefined) {
+        throw new MobileCheckinError("Accompanying guest limit reached.", 409, "ACCOMPANY_LIMIT_REACHED");
+      }
+      guestIndex = nextIndex;
 
       // Build the new accompanying list: keep existing + add new one
-      const existingInfos: MobileGuestInfoInput[] = [];
+      const existingInfos: MobileAccompanyingInput[] = [];
       for (const member of existingAccom) {
-        if (!member.guest_profile_id) continue;
-        const { data: profile } = await supabase
+        if (!member.guest_profile_id) throw new MobileCheckinError("Existing guest profile is missing.", 409, "ACCOMPANY_PROFILE_MISSING");
+        const { data: profile, error: profileError } = await supabase
           .from("guest_profiles")
           .select("first_name, last_name, passport_no, id_number, nationality_code, dob, gender")
           .eq("id", member.guest_profile_id)
           .maybeSingle();
+        if (profileError) throw new MobileCheckinError(profileError.message, 500, "ACCOMPANY_PROFILE_READ_FAILED");
+        if (!profile) throw new MobileCheckinError("Existing guest profile is missing.", 409, "ACCOMPANY_PROFILE_MISSING");
+        const fullName = `${profile.first_name || ""} ${profile.last_name || ""}`.trim();
+        if (!fullName) throw new MobileCheckinError("Existing guest profile has no name.", 409, "ACCOMPANY_PROFILE_INCOMPLETE");
         if (profile) {
           existingInfos.push({
-            full_name: `${profile.first_name || ""} ${profile.last_name || ""}`.trim(),
+            passport_guest_index: Number(member.display_order) - 1,
+            full_name: fullName,
             first_name: profile.first_name || null,
             last_name: profile.last_name || null,
             passport_no: profile.passport_no || profile.id_number || null,
@@ -180,7 +210,7 @@ export async function POST(request: NextRequest) {
       }
 
       // Add the new OCR guest
-      existingInfos.push(guestInfo);
+      existingInfos.push({ ...guestInfo, passport_guest_index: guestIndex });
 
       // Get primary guest profile id
       const primaryGuestProfileId = reservation.guest_profile_id

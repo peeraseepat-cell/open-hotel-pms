@@ -1,3 +1,5 @@
+import { fetchAllRowsComplete } from "@/lib/complete-fetch";
+import { compareFiledInvoiceRows } from "./filing-order";
 import {
   abbreviatedTaxErrorResponse,
   requireAbbreviatedTaxActor,
@@ -43,19 +45,37 @@ async function loadFullTaxInvoices(params: {
   month: number;
 }): Promise<SalesTaxFullInvoiceInput[]> {
   const { from, to } = monthDateRange(params.year, params.month);
-  const { data, error } = await params.supabase
-    .from("invoices")
-    .select("invoice_no, issue_date, customer_name, customer_tax_id, subtotal, vat_amount, grand_total")
-    .eq("status", "issued")
-    .gte("issue_date", from)
-    .lte("issue_date", to)
-    .order("issue_date", { ascending: true })
-    .order("invoice_no", { ascending: true })
-    .limit(5000);
 
-  if (error) throw new Error(`Failed to load full tax invoices: ${error.message}`);
-  return (data ?? []) as SalesTaxFullInvoiceInput[];
+  // This feeds a government sales-tax filing. PostgREST's 1000-row cap meant a
+  // month with more than 1000 issued invoices was filed SHORT, with nothing in
+  // the workbook to say so.
+  try {
+    const rows = await fetchAllRowsComplete<SalesTaxFullInvoiceInput>(
+      () =>
+        params.supabase
+          .from("invoices")
+          // `id` added for the keyset cursor — the pager reads it from every row
+          // and refuses when it is absent. It is not emitted in the workbook.
+          .select(
+            "id, invoice_no, issue_date, customer_name, customer_tax_id, subtotal, vat_amount, grand_total",
+            { count: "exact" }
+          )
+          .eq("status", "issued")
+          .gte("issue_date", from)
+          .lte("issue_date", to),
+      { label: "full tax invoices for the sales-tax report" }
+    );
+    // The pager orders by its keyset cursor, so the filing order is restored here.
+    return rows.sort(compareFiledInvoiceRows);
+  } catch (error) {
+    throw new Error(
+      `Failed to load full tax invoices: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
 }
+
+// Filing order lives in ./filing-order.ts so the ORDER OF A FILED DOCUMENT is
+// testable without a database. See filing-order.test.mts.
 
 export async function GET(request: NextRequest) {
   try {

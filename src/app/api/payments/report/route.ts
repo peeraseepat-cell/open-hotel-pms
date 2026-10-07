@@ -1,4 +1,7 @@
+import { comparePaymentsChronological, comparePosOrdersChronological } from "../chronological-order";
+import { fetchAllRowsComplete } from "@/lib/complete-fetch";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
+import { requireStaffAuth } from "@/lib/server-auth";
 import {
   PAYMENT_REPORT_CATEGORIES,
   PAYMENT_REPORT_METHOD_KEYS,
@@ -40,6 +43,13 @@ type ExcludedBreakdownRow = {
   amount: number;
 };
 
+type PosOrderRow = {
+  id: string;
+  order_date: string | null;
+  total: number | null;
+  payment_method: string | null;
+};
+
 function chunkArray<T>(items: T[], size = 200): T[][] {
   const chunks: T[][] = [];
   for (let index = 0; index < items.length; index += size) {
@@ -47,6 +57,13 @@ function chunkArray<T>(items: T[], size = 200): T[][] {
   }
   return chunks;
 }
+
+// Both comparators, and the `compareText` they share, now live in
+// ../chronological-order.ts — identical to the copy this route carried, and
+// identical to detail/route.ts's copy of the same thing. They moved so the ORDER
+// can be run against fixtures: while they were private here, the contract test
+// could only assert that a `.sort(...)` call existed, and a review walked
+// through that with an inert compareText and a flipped one.
 
 function countTowardsPaymentDailyNet(
   txType: PaymentReportTxType,
@@ -75,6 +92,9 @@ export async function GET(request: NextRequest) {
   noStore();
   try {
     const supabase = createServerSupabaseClient();
+    const auth = await requireStaffAuth(supabase, request);
+    if (auth.error) return auth.error;
+
     const { searchParams } = new URL(request.url);
 
     const startDate = (searchParams.get("start") ?? "").trim();
@@ -94,30 +114,56 @@ export async function GET(request: NextRequest) {
     } = await resolvePaymentReportBusinessDates(supabase, effectiveStart, effectiveEnd);
     const spilloverIncluded = countedDateAlias.size > 0;
 
-    const [paymentsRes, posOrdersRes] = await Promise.all([
-      supabase
-        .from("folio_payments")
-        .select("id, reservation_id, pos_order_id, paid_date, paid_at, method, tx_type, amount, note, revenue_category, cashier_name, is_record_only, is_correction, is_void_reversal, void_of")
-        .in("paid_date", scopedDates)
-        .order("paid_date", { ascending: true })
-        .order("paid_at", { ascending: true }),
-      supabase
-        .from("pos_orders")
-        .select("id, order_date, total, payment_method")
-        .eq("status", "completed")
-        .eq("order_type", "walkin")
-        .in("order_date", scopedDates)
-        .order("order_date", { ascending: true }),
-    ]);
-
-    if (paymentsRes.error) {
-      return NextResponse.json({ success: false, error: paymentsRes.error.message }, { status: 500 });
+    // Both reads span a free-form date range with no bound, so PostgREST's
+    // 1000-row cap truncated them silently — and every total below, tx_count
+    // included, was then computed from the truncated set with no on-screen
+    // signal that anything was missing.
+    let rows: PaymentReportRow[];
+    let posOrderRows: PosOrderRow[];
+    try {
+      [rows, posOrderRows] = await Promise.all([
+        fetchAllRowsComplete<PaymentReportRow>(
+          () =>
+            supabase
+              .from("folio_payments")
+              .select(
+                "id, reservation_id, pos_order_id, paid_date, paid_at, method, tx_type, amount, note, revenue_category, cashier_name, is_record_only, is_correction, is_void_reversal, void_of",
+                { count: "exact" }
+              )
+              .in("paid_date", scopedDates),
+          { label: "folio payments" }
+        ),
+        fetchAllRowsComplete<PosOrderRow>(
+          () =>
+            supabase
+              .from("pos_orders")
+              .select("id, order_date, total, payment_method", { count: "exact" })
+              .eq("status", "completed")
+              .eq("order_type", "walkin")
+              .in("order_date", scopedDates),
+          { label: "POS walk-in orders" }
+        ),
+      ]);
+    } catch (error) {
+      return NextResponse.json(
+        { success: false, error: error instanceof Error ? error.message : String(error) },
+        { status: 500 }
+      );
     }
-    if (posOrdersRes.error) {
-      return NextResponse.json({ success: false, error: posOrdersRes.error.message }, { status: 500 });
-    }
 
-    const rows = (paymentsRes.data ?? []) as PaymentReportRow[];
+    // The pager orders by its keyset cursor (`id`), so the chronological order
+    // these reads used to carry in SQL is restored here.
+    //
+    // Precautionary rather than proven load-bearing, and worth saying which:
+    // this endpoint returns only aggregates (summary / by_method / by_category /
+    // by_day) and its void-set helper builds Sets, so no total depends on row
+    // order. But `excluded_breakdown` and `deposit_method_mismatches` are ARRAYS
+    // accumulated in row order, and their element order is response-visible. A
+    // sort over a few thousand rows is free; proving those two arrays are
+    // order-insensitive is not, so the order is restored instead.
+    rows.sort(comparePaymentsChronological);
+    posOrderRows.sort(comparePosOrdersChronological);
+
     const scopedPaymentIds = rows
       .map((row) => String(row.id ?? "").trim())
       .filter(Boolean);
@@ -330,7 +376,7 @@ export async function GET(request: NextRequest) {
       day.tx_count += 1;
     }
 
-    for (const posOrder of (posOrdersRes.data ?? []) as Array<{ id: string; order_date: string | null; total: number | null; payment_method: string | null }>) {
+    for (const posOrder of posOrderRows) {
       const paidDate = String(posOrder.order_date ?? effectiveStart);
       const countedDate = countedDateAlias.get(paidDate) ?? paidDate;
       const method = normalizePaymentReportMethod(posOrder.payment_method);

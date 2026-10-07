@@ -366,8 +366,21 @@ export async function POST(
     );
   }
 
-  const settlementRows: Record<string, unknown>[] = [];
+  let cancelFeeRecordOnlyExists = false;
   if (feeFromPrepaid > 0) {
+    const { data: existingFeeRows, error: existingFeeError } = await supabase
+      .from("folio_payments")
+      .select("id")
+      .eq("reservation_id", reservationId)
+      .eq("fee_template_code", "CANCEL_FEE")
+      .eq("is_record_only", true)
+      .limit(1);
+    if (existingFeeError) return NextResponse.json({ error: existingFeeError.message }, { status: 500 });
+    cancelFeeRecordOnlyExists = (existingFeeRows ?? []).length > 0;
+  }
+
+  const settlementRows: Record<string, unknown>[] = [];
+  if (feeFromPrepaid > 0 && !cancelFeeRecordOnlyExists) {
     settlementRows.push({
       reservation_id: reservationId,
       tx_type: "payment",

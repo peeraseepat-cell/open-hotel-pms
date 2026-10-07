@@ -29,6 +29,15 @@ const PUBLIC_MUTATION_API_PREFIXES = [
   "/api/auth",
   "/api/webhooks",
   "/api/linen/vendor",
+  "/api/integrations/scb/callback",
+  "/api/backup/device-pair",
+  "/api/cron",
+];
+const PUBLIC_GET_API_PREFIXES = [
+  "/api/health",
+  "/api/cron",
+  "/api/linen/vendor",
+  "/api/backup",
 ];
 const PUBLIC_MUTATION_API_PATTERNS = [
   /^\/api\/telegram\/webhook\/(?!register(?:\/|$))[^/]+$/,
@@ -51,6 +60,10 @@ function isPublicMutationApiPath(pathname: string): boolean {
     PUBLIC_MUTATION_API_PREFIXES.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`)) ||
     PUBLIC_MUTATION_API_PATTERNS.some((pattern) => pattern.test(pathname))
   );
+}
+
+function isPublicGetApiPath(pathname: string): boolean {
+  return PUBLIC_GET_API_PREFIXES.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));
 }
 
 function isOwnerSafeMutationApiPath(pathname: string): boolean {
@@ -122,7 +135,12 @@ export async function middleware(request: NextRequest) {
       : await supabase.auth.getUser();
     const user = authData.user;
 
-    if (!user) return response;
+    if (!user) {
+      return NextResponse.json(
+        { success: false, error: "Unauthorized" },
+        { status: 401 }
+      );
+    }
 
     const { data: profile } = await supabase
       .from("profiles")
@@ -135,6 +153,29 @@ export async function middleware(request: NextRequest) {
       return NextResponse.json(
         { success: false, error: "Owner is view-only." },
         { status: 403 }
+      );
+    }
+
+    return response;
+  }
+
+  if (pathname.startsWith("/api") && request.method.toUpperCase() === "GET") {
+    if (isPublicGetApiPath(pathname)) {
+      return NextResponse.next();
+    }
+
+    const response = NextResponse.next();
+    const supabase = createMiddlewareSupabaseClient(request, response);
+    const authHeader = request.headers.get("authorization");
+    const bearerToken = authHeader?.match(/^Bearer\s+(.+)$/i)?.[1] ?? null;
+    const { data: authData } = bearerToken
+      ? await supabase.auth.getUser(bearerToken)
+      : await supabase.auth.getUser();
+
+    if (!authData.user) {
+      return NextResponse.json(
+        { success: false, error: "Unauthorized" },
+        { status: 401 }
       );
     }
 

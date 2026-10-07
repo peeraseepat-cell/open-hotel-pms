@@ -5,6 +5,7 @@ import { assertAdminOrSupervisor, getAuthenticatedUser } from "@/lib/server-auth
 import { searchPosTargets, searchReservationTargets } from "@/lib/scb/targets";
 
 export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
 
 const querySchema = z.object({
   type: z.enum(["reservation", "pos_order"]),

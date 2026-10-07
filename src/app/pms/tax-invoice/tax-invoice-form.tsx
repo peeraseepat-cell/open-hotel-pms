@@ -3,6 +3,12 @@
 import { useState, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { mergeSameRateRoomLineItems } from "@/lib/tax-invoice/line-item-merge";
+import { mergeExtraIntoRoomLines } from "@/lib/tax-invoice/merge-extra-into-room";
+import {
+  itemDiscountAmount,
+  itemGrossAmount,
+  trimRoomLineItemToDates,
+} from "@/lib/tax-invoice/trim-room-line";
 import {
   TaxInvoiceLineItem,
   TaxInvoiceTotals,
@@ -61,37 +67,6 @@ type DisplayLineItem = {
 function normalizeInvoiceKind(value: unknown): TaxInvoiceKind {
   const kind = String(value ?? "standard").trim().toLowerCase();
   return kind === "prepayment" || kind === "balance" ? kind : "standard";
-}
-
-function itemGrossAmount(item: TaxInvoiceLineItem): number {
-  const gross = Number(item.gross_amount ?? 0);
-  if (Number.isFinite(gross) && gross > 0) return gross;
-  return round2(Number(item.amount || 0) + Number(item.discount_amount || 0));
-}
-
-function itemDiscountAmount(item: TaxInvoiceLineItem): number {
-  const explicit = Number(item.discount_amount ?? 0);
-  if (Number.isFinite(explicit) && explicit > 0) return round2(explicit);
-  return Math.max(0, round2(itemGrossAmount(item) - Number(item.amount || 0)));
-}
-
-function trimRoomLineItemToDates(item: TaxInvoiceLineItem, dates: string[]): TaxInvoiceLineItem {
-  const sourceDates = item.stay_dates?.length ? item.stay_dates : dates;
-  const sourceQuantity = Math.max(1, Number(item.quantity || sourceDates.length || 1));
-  const ratio = dates.length / sourceQuantity;
-  const gross = round2(itemGrossAmount(item) * ratio);
-  const discount = round2(itemDiscountAmount(item) * ratio);
-  const amount = Math.max(0, round2(gross - discount));
-
-  return {
-    ...item,
-    stay_dates: dates,
-    quantity: dates.length,
-    gross_amount: gross,
-    discount_amount: discount,
-    amount,
-    unit_price: round2(gross / Math.max(1, dates.length)),
-  };
 }
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -384,91 +359,11 @@ export default function TaxInvoiceForm({
         ? [specificDate]
         : []
       : invoiceNightOptions;
-    const targetDateSet = new Set(targetDates);
-    if (targetDateSet.size === 0) return;
+    if (targetDates.length === 0) return;
 
-    setLineItems((current) => {
-      const candidateMeta = current
-        .map((item, index) => {
-          if (item.kind !== "room_charge") return null;
-          if (item.reservation_id && item.reservation_id !== extra.reservation_id) return null;
-          const dates = (item.stay_dates?.length ? item.stay_dates : invoiceNightOptions).filter((date) =>
-            targetDateSet.has(date)
-          );
-          if (dates.length === 0) return null;
-          return { index, dates };
-        })
-        .filter((row): row is { index: number; dates: string[] } => Boolean(row));
-
-      if (candidateMeta.length === 0) return current;
-
-      const totalTargetNights = candidateMeta.reduce((sum, row) => sum + row.dates.length, 0);
-      let allocated = 0;
-      const shareByIndex = new Map<number, number>();
-      candidateMeta.forEach((row, rowIndex) => {
-        const share = rowIndex === candidateMeta.length - 1
-          ? round2(extra.amount - allocated)
-          : round2((extra.amount * row.dates.length) / Math.max(1, totalTargetNights));
-        allocated = round2(allocated + share);
-        shareByIndex.set(row.index, share);
-      });
-
-      return current.flatMap((item, index) => {
-        const extraAmount = shareByIndex.get(index);
-        if (!extraAmount || item.kind !== "room_charge") return [item];
-
-        const allDates = item.stay_dates?.length ? [...item.stay_dates].sort() : [];
-        const selectedDates = allDates.filter((date) => targetDateSet.has(date));
-        if (allDates.length === 0 || selectedDates.length === 0) {
-          const quantity = Number(item.quantity || 1) || 1;
-          const nextAmount = round2(item.amount + extraAmount);
-          return [{
-            ...item,
-            amount: nextAmount,
-            unit_price: round2(nextAmount / quantity),
-            merged_extra_charge_ids: [...(item.merged_extra_charge_ids ?? []), extra.id],
-            merged_extra_charge_total: round2((item.merged_extra_charge_total ?? 0) + extraAmount),
-            note: item.note,
-          }];
-        }
-
-        const unaffectedBefore = allDates.filter((date) => !targetDateSet.has(date) && date < selectedDates[0]);
-        const unaffectedAfter = allDates.filter((date) => !targetDateSet.has(date) && date > selectedDates[selectedDates.length - 1]);
-        const untouchedOther = allDates.filter(
-          (date) => !targetDateSet.has(date) && !unaffectedBefore.includes(date) && !unaffectedAfter.includes(date)
-        );
-        const baseQuantity = Number(item.quantity || allDates.length) || allDates.length;
-        const baseExtraTotal = item.merged_extra_charge_total ?? 0;
-        const baseAmount = Math.max(0, round2(item.amount - baseExtraTotal));
-        const baseUnitPrice = round2(baseAmount / Math.max(1, baseQuantity));
-
-        const makeRoomLine = (dates: string[], mergeAmount = 0): TaxInvoiceLineItem | null => {
-          if (dates.length === 0) return null;
-          const amount = round2(baseUnitPrice * dates.length + mergeAmount);
-          return {
-            ...item,
-            stay_dates: dates,
-            quantity: dates.length,
-            amount,
-            unit_price: round2(amount / Math.max(1, dates.length)),
-            merged_extra_charge_ids: mergeAmount > 0
-              ? [...(item.merged_extra_charge_ids ?? []), extra.id]
-              : item.merged_extra_charge_ids,
-            merged_extra_charge_total: mergeAmount > 0
-              ? round2((item.merged_extra_charge_total ?? 0) + mergeAmount)
-              : item.merged_extra_charge_total,
-            note: item.note,
-          };
-        };
-
-        return [
-          makeRoomLine(unaffectedBefore),
-          makeRoomLine(untouchedOther),
-          makeRoomLine(selectedDates, extraAmount),
-          makeRoomLine(unaffectedAfter),
-        ].filter((row): row is TaxInvoiceLineItem => Boolean(row));
-      });
-    });
+    setLineItems((current) =>
+      mergeExtraIntoRoomLines(current, extra, targetDates, invoiceNightOptions)
+    );
   };
 
   // ── Lookup ─────────────────────────────────────────────────────────────────
@@ -1032,15 +927,18 @@ export default function TaxInvoiceForm({
                 >
                   {mergeSameRateRows ? "Merged rows" : "Merge same rate"}
                 </button>
-                {mode === "issue" && (
-                  <button
-                    type="button"
-                    onClick={() => setShowExtraPicker((value) => !value)}
-                    className="text-[10px] uppercase font-bold text-brand-600 hover:text-brand-700"
-                  >
-                    + Add Item
-                  </button>
-                )}
+                {/* Also reachable while editing: an issued invoice can be missing
+                    an extra charge (see the edit page's line_items comment), and
+                    without this button there was no way to put it back from the
+                    UI at all. selectedExtraIds already blocks adding the same
+                    folio charge twice. */}
+                <button
+                  type="button"
+                  onClick={() => setShowExtraPicker((value) => !value)}
+                  className="text-[10px] uppercase font-bold text-brand-600 hover:text-brand-700"
+                >
+                  + Add Item
+                </button>
               </div>
             </div>
 

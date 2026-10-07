@@ -1,7 +1,8 @@
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 import { syncBookingGroupStatusById } from "@/lib/booking-group-status";
-import { normalizeAuditSource, toBangkokDateString } from "@/lib/audit-utils";
+import { normalizeAuditSource } from "@/lib/audit-utils";
 import { clearAlertsForInactiveReservations } from "@/lib/alerts/lifecycle";
+import { getNightAuditSettings } from "@/lib/night-audit";
 import { NextRequest, NextResponse } from "next/server";
 
 export async function POST(
@@ -10,11 +11,12 @@ export async function POST(
 ) {
     try {
         const supabase = createServerSupabaseClient();
+        const { businessDate } = await getNightAuditSettings(supabase);
         const reservationId = params.id;
 
         const { data: reservation, error } = await supabase
             .from("reservations")
-            .select("id, booking_group_id, status, guest_name, checkin_date")
+            .select("id, booking_group_id, status, guest_name, checkin_date, checked_in_at")
             .eq("id", reservationId)
             .maybeSingle();
 
@@ -24,6 +26,9 @@ export async function POST(
         if (reservation.status !== "active") {
             return NextResponse.json({ error: "Only active reservations can be marked no-show." }, { status: 400 });
         }
+        if (reservation.checked_in_at) {
+            return NextResponse.json({ error: "Reservation was already checked in." }, { status: 409 });
+        }
 
         const { error: updateError } = await supabase
             .from("reservations")
@@ -31,6 +36,14 @@ export async function POST(
             .eq("id", reservationId);
 
         if (updateError) return NextResponse.json({ error: updateError.message }, { status: 500 });
+
+        const { error: cancelNightsError } = await supabase
+            .from("reservation_nights")
+            .update({ cancelled_at: new Date().toISOString() })
+            .eq("reservation_id", reservationId)
+            .is("cancelled_at", null);
+
+        if (cancelNightsError) return NextResponse.json({ error: cancelNightsError.message }, { status: 500 });
 
         try {
             const alertCleanupCounts = await clearAlertsForInactiveReservations({
@@ -58,7 +71,7 @@ export async function POST(
                 checkin_date: reservation.checkin_date,
                 marked_at: new Date().toISOString()
             },
-            business_date: toBangkokDateString(),
+            business_date: businessDate,
             source: normalizeAuditSource("manual"),
         });
 

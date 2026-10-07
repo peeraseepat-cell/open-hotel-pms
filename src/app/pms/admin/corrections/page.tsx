@@ -24,9 +24,9 @@ function correctionSummary(record: AdminCorrectionRecord): string | null {
     case "adjustment": {
       const amt = after.amount as number | undefined;
       const method = after.method as string | undefined;
-      const isRecordOnly = after.is_record_only as boolean | undefined;
+      const txType = after.tx_type as string | undefined;
       if (amt != null) {
-        const dir = isRecordOnly ? "Add charge" : "Reduce charge";
+        const dir = txType === "refund" ? "Reduce charge" : "Add charge";
         return `${dir} ฿${formatMoney(amt)} (${method ?? "—"})`;
       }
       return null;
@@ -326,6 +326,9 @@ export default function AdminCorrectionsPage() {
       } else if (selectedAction === "adjustment") {
         const amt = Number(adjAmount);
         if (!amt || amt <= 0) throw new Error("Invalid amount");
+        if (adjType === "reduce" && !adjOriginalPaymentId) {
+          throw new Error("Please select the charge being reduced");
+        }
         endpoint = `/api/admin/corrections/adjustment`;
         payload.reservation_id = reservationId;
         payload.direction = adjType === "add" ? "add_charge" : "reduce_charge";
@@ -635,7 +638,10 @@ export default function AdminCorrectionsPage() {
                     <div className="grid grid-cols-2 gap-4">
                       <div>
                         <label className="form-label">Direction</label>
-                        <select className="form-select w-full" value={adjType} onChange={e => setAdjType(e.target.value as any)} disabled={isSubmitting}>
+                        <select className="form-select w-full" value={adjType} onChange={e => {
+                          setAdjType(e.target.value as any);
+                          setAdjOriginalPaymentId("");
+                        }} disabled={isSubmitting}>
                           <option value="reduce">Reduce charge / Add Payment (Credit)</option>
                           <option value="add">Add charge / Reduce Payment (Debit)</option>
                         </select>
@@ -665,10 +671,15 @@ export default function AdminCorrectionsPage() {
                       </div>
                     </div>
                     <div>
-                      <label className="form-label">Original Payment (Optional)</label>
-                      <select className="form-select w-full" value={adjOriginalPaymentId} onChange={e => setAdjOriginalPaymentId(e.target.value)} disabled={isSubmitting}>
+                      <label className="form-label">
+                        {adjType === "reduce" ? "Original Charge" : "Original Payment (Optional)"}
+                      </label>
+                      <select className="form-select w-full" value={adjOriginalPaymentId} onChange={e => setAdjOriginalPaymentId(e.target.value)} disabled={isSubmitting} required={adjType === "reduce"}>
                         <option value="">-- None --</option>
-                        {(folio?.ledger.filter(r => r.type === "payment" || r.type === "deposit" || r.type === "extra_charge") || []).map(p => (
+                        {(folio?.ledger.filter(r => adjType === "reduce"
+                          ? r.type === "extra_charge" && r.tx_type === "payment"
+                          : r.type === "payment" || r.type === "deposit" || r.type === "extra_charge"
+                        ) || []).map(p => (
                           <option key={p.id} value={p.id}>
                             [{p.type.toUpperCase()}] {formatSimpleDate(p.occurred_at)} - {p.method?.toUpperCase()} ฿{formatMoney(p.amount)}
                           </option>

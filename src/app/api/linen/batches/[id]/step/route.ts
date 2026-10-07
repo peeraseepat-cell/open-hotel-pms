@@ -16,6 +16,10 @@ const schema = z.object({
     is_dayuse: z.boolean().optional(),
   })).optional(),
   pending_resolved: z.array(z.object({ pending_item_id: z.string().uuid() })).optional(),
+  rewash_resolved: z.array(z.object({
+    rewash_event_id: z.coerce.number().int().positive(),
+    resolved_qty: z.coerce.number().int().positive(),
+  })).optional(),
 });
 
 async function handleStepRequest(request: NextRequest, { params }: { params: { id: string } }) {

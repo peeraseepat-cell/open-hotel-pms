@@ -25,6 +25,7 @@ import { fromSatang, toSatang } from "@/lib/money";
 import { resolveBusinessDate, toLocalDate } from "@/lib/folio-fees";
 import { assertRoomAvailableForDateRange, PlannedRoomMoveError } from "@/lib/planned-room-moves";
 import { assertRoomTypeCapacityForDateRange } from "@/lib/room-type-capacity";
+import { computeReservationDiscountAmount } from "@/lib/reservation-discount";
 
 // ─── Helpers ───────────────────────────────────────────────────
 
@@ -595,7 +596,11 @@ export async function postAdjustment(
   const isAddCharge = params.direction === "add_charge";
   const txType = isAddCharge ? "payment" : "refund";
   const revenueCategory = "extra_charge";
-  const isRecordOnly = isAddCharge;
+  let isRecordOnly = isAddCharge;
+
+  if (!isAddCharge && !params.originalPaymentId) {
+    throw new AdminCorrectionError("reduce_charge requires selecting the charge being reduced.");
+  }
 
   // If correcting a specific payment, verify it exists
   let correctionRef: string | null = null;
@@ -603,6 +608,12 @@ export async function postAdjustment(
     const original = await loadPayment(supabase, params.originalPaymentId);
     if (original.reservation_id !== params.reservationId) {
       throw new AdminCorrectionError("Original payment belongs to a different reservation.");
+    }
+    if (!isAddCharge) {
+      if (original.tx_type !== "payment" || original.revenue_category !== "extra_charge") {
+        throw new AdminCorrectionError("reduce_charge requires selecting an extra charge row.");
+      }
+      isRecordOnly = original.is_record_only;
     }
     correctionRef = params.originalPaymentId;
   }
@@ -949,7 +960,15 @@ export async function closeFolio(
     throw new AdminCorrectionError("Reason is required.");
   }
 
-  const res = await loadReservationWithFolioFlag(supabase, reservationId, ["guest_name", "total_price"]);
+  const res = await loadReservationWithFolioFlag(supabase, reservationId, [
+    "guest_name",
+    "total_price",
+    "discount_type",
+    "discount_value",
+    "discount_percent",
+    "checkin_date",
+    "checkout_date",
+  ]);
 
   if (!res.folio_reopened) {
     throw new AdminCorrectionError("Folio is not currently open.");
@@ -961,7 +980,18 @@ export async function closeFolio(
     .select("tx_type, amount, revenue_category, note, is_record_only")
     .eq("reservation_id", reservationId);
 
-  const baseRoomChargeSatang = toSatang((res.total_price as number) ?? 0);
+  const totalPriceSatang = toSatang((res.total_price as number) ?? 0);
+  const discountSatang = toSatang(
+    computeReservationDiscountAmount({
+      totalPrice: res.total_price as number | string | null | undefined,
+      discountType: res.discount_type as string | null | undefined,
+      discountValue: res.discount_value as number | string | null | undefined,
+      discountPercent: res.discount_percent as number | string | null | undefined,
+      checkinDate: res.checkin_date as string | null | undefined,
+      checkoutDate: res.checkout_date as string | null | undefined,
+    })
+  );
+  const baseRoomChargeSatang = Math.max(0, totalPriceSatang - discountSatang);
   const netPaid = computeCheckoutNetPaidSatang(payments ?? []);
   const extraChargeNetSatang = computeExtraChargeNetSatang(payments ?? []);
   const outstandingSatang = baseRoomChargeSatang + extraChargeNetSatang - netPaid.netPaidSatang;

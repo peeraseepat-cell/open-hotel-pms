@@ -1,4 +1,4 @@
-import { createServerSupabaseClient } from "@/lib/supabase/server";
+import { maintenanceApiError, requireMaintenanceAccess } from "@/lib/maintenance/api-auth";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
@@ -25,6 +25,8 @@ export async function PUT(
   context: { params: { id: string } }
 ) {
   try {
+    const { supabase } = await requireMaintenanceAccess(request, "write");
+
     const parsedParams = paramsSchema.safeParse(context.params);
     if (!parsedParams.success) {
       return NextResponse.json(
@@ -43,7 +45,6 @@ export async function PUT(
     }
 
     const taskId = parsedParams.data.id;
-    const supabase = createServerSupabaseClient();
 
     const { data: existingTask, error: existingError } = await supabase
       .from("maintenance_tasks")
@@ -99,16 +100,28 @@ export async function PUT(
 
     return NextResponse.json({ success: true });
   } catch (err) {
-    console.error("maintenance/tasks/[id] PUT unexpected", err);
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    const { status, message } = maintenanceApiError(err);
+    if (status >= 500) console.error("maintenance/tasks/[id] PUT unexpected", err);
+    return NextResponse.json({ error: message }, { status });
   }
 }
 
+// DELETE = deactivate, not destroy. The hard delete cascaded through
+// maintenance_logs / maintenance_assignments / maintenance_task_times (all
+// `on delete cascade`), so removing one task erased its entire service history.
+// The route stays for UI compatibility, but retires the task via is_active instead:
+// get_room_maintenance_status() already excludes inactive tasks (phase9:220) and
+// POST /assignments already refuses them with a 409, so retiring is complete without
+// touching a row of history. The task list deliberately still shows inactive tasks
+// (ordered active-last) so an admin can reactivate — and so a retired task's name
+// stays visible, since `name` is UNIQUE and an invisible row would block re-creating it.
 export async function DELETE(
-  _request: NextRequest,
+  request: NextRequest,
   context: { params: { id: string } }
 ) {
   try {
+    const { supabase } = await requireMaintenanceAccess(request, "delete");
+
     const parsedParams = paramsSchema.safeParse(context.params);
     if (!parsedParams.success) {
       return NextResponse.json(
@@ -117,10 +130,9 @@ export async function DELETE(
       );
     }
 
-    const supabase = createServerSupabaseClient();
     const { data, error } = await supabase
       .from("maintenance_tasks")
-      .delete()
+      .update({ is_active: false })
       .eq("id", parsedParams.data.id)
       .select("id")
       .maybeSingle();
@@ -133,9 +145,10 @@ export async function DELETE(
       return NextResponse.json({ error: "Task not found." }, { status: 404 });
     }
 
-    return NextResponse.json({ success: true });
+    return NextResponse.json({ success: true, deactivated: true });
   } catch (err) {
-    console.error("maintenance/tasks/[id] DELETE unexpected", err);
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    const { status, message } = maintenanceApiError(err);
+    if (status >= 500) console.error("maintenance/tasks/[id] DELETE unexpected", err);
+    return NextResponse.json({ error: message }, { status });
   }
 }

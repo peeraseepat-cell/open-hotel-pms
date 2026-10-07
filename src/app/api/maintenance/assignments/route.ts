@@ -1,4 +1,4 @@
-import { createServerSupabaseClient } from "@/lib/supabase/server";
+import { maintenanceApiError, requireMaintenanceAccess } from "@/lib/maintenance/api-auth";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
@@ -66,6 +66,7 @@ function parseUuidList(raw: string): string[] {
 
 export async function GET(request: NextRequest) {
   try {
+    const { supabase } = await requireMaintenanceAccess(request, "read");
     const mode = request.nextUrl.searchParams.get("mode") ?? "list";
 
     if (mode === "due") {
@@ -87,7 +88,6 @@ export async function GET(request: NextRequest) {
         return NextResponse.json({ success: true, date: targetDate, due_tasks: [] });
       }
 
-      const supabase = createServerSupabaseClient();
       const { data: dueRows, error: dueError } = await supabase.rpc("get_maintenance_for_rooms", {
         p_room_ids: roomIds,
       });
@@ -168,7 +168,6 @@ export async function GET(request: NextRequest) {
     }
 
     const targetDate = parsedQuery.data.date ?? getThailandDateString();
-    const supabase = createServerSupabaseClient();
 
     const { data, error } = await supabase.rpc("get_todays_maintenance_assignments", {
       p_target_date: targetDate,
@@ -196,13 +195,15 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({ success: true, assignments });
   } catch (err) {
-    console.error("maintenance/assignments GET unexpected", err);
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    const { status, message } = maintenanceApiError(err);
+    if (status >= 500) console.error("maintenance/assignments GET unexpected", err);
+    return NextResponse.json({ error: message }, { status });
   }
 }
 
 export async function POST(request: NextRequest) {
   try {
+    const { supabase } = await requireMaintenanceAccess(request, "write");
     const body = await request.json().catch(() => null);
     const parsedBody = createAssignmentSchema.safeParse(body);
 
@@ -214,7 +215,6 @@ export async function POST(request: NextRequest) {
     }
 
     const payload = parsedBody.data;
-    const supabase = createServerSupabaseClient();
 
     const { data: room, error: roomError } = await supabase
       .from("rooms")
@@ -274,7 +274,8 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ success: true, assignment: data }, { status: 201 });
   } catch (err) {
-    console.error("maintenance/assignments POST unexpected", err);
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    const { status, message } = maintenanceApiError(err);
+    if (status >= 500) console.error("maintenance/assignments POST unexpected", err);
+    return NextResponse.json({ error: message }, { status });
   }
 }

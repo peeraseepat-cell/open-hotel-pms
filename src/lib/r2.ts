@@ -57,13 +57,16 @@ export async function deleteR2Objects(keys: string[]) {
 
   for (let index = 0; index < uniqueKeys.length; index += 1000) {
     const chunk = uniqueKeys.slice(index, index + 1000);
-    await getR2Client().send(new DeleteObjectsCommand({
+    const response = await getR2Client().send(new DeleteObjectsCommand({
       Bucket: getR2Bucket(),
       Delete: {
         Objects: chunk.map((Key) => ({ Key })),
         Quiet: true,
       },
     }));
+    if (response.Errors?.length) {
+      throw new Error(`Failed to delete ${response.Errors.length} R2 object(s).`);
+    }
   }
 
   return { deleted: uniqueKeys.length };

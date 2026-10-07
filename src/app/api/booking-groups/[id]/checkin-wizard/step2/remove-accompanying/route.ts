@@ -29,23 +29,20 @@ export async function POST(
       return NextResponse.json({ success: false, error: "Reservation not found in this group." }, { status: 404 });
     }
 
-    const { data: deleted, error } = await supabase
-      .from("reservation_guests")
-      .delete()
-      .eq("reservation_id", reservationId)
-      .eq("guest_profile_id", guestProfileId)
-      .eq("role", "accompanying")
-      .select("id");
+    const { data: removal, error } = await supabase.rpc("remove_accompanying_guest", {
+      p_reservation_id: reservationId,
+      p_guest_profile_id: guestProfileId,
+    });
 
     if (error) {
       return NextResponse.json({ success: false, error: error.message }, { status: 500 });
     }
 
-    if (!deleted || deleted.length === 0) {
+    if (!removal || Number(removal.removed) === 0) {
       return NextResponse.json({ success: false, error: "Accompanying guest link not found." }, { status: 404 });
     }
 
-    return NextResponse.json({ success: true, removed: deleted.length });
+    return NextResponse.json({ success: true, removed: Number(removal.removed) });
   } catch (err) {
     return NextResponse.json(
       { success: false, error: err instanceof Error ? err.message : "Internal server error" },

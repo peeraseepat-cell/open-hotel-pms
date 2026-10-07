@@ -142,7 +142,7 @@ export function completeChargedReservationNightsFromAuditTotal<T extends Allocat
   refundTotal: number
 ): T[] {
   const activeNights = loadedNights.filter((night) => !night.cancelled_at);
-  if (auditRoomTotal <= 0 || activeNights.length === 0) return sortNights(activeNights);
+  if (auditRoomTotal <= 0) return sortNights(activeNights);
   if (refundTotal > 0) return sortNights(activeNights);
 
   const residualTotal = round2(auditRoomTotal - sumNightPrices(activeNights));

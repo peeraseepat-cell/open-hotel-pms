@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { isLegacyDayUseRoom } from "@/lib/dayuse-rooms";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
+import { loadRoomStayNights } from "@/lib/room-stay-nights";
 
 // GET /api/setup/rooms — all rooms with features, beds, detail, total_nights, max_guests
 // Graceful: works both before and after migrations are applied
@@ -66,14 +67,11 @@ export async function GET() {
             details = dData ?? [];
         } catch { /* migration not yet applied */ }
 
-        // 6. Total nights from room_stay_history (post-migration, graceful)
-        let stayHistory: any[] = [];
-        try {
-            const { data: shData } = await supabase
-                .from("room_stay_history")
-                .select("room_id");
-            stayHistory = shData ?? [];
-        } catch { /* migration not yet applied */ }
+        // 6. Total nights from room_stay_history (post-migration, graceful).
+        // Paged past the 1000-row cap. Migration-tolerance is now discriminated by error code
+        // (undefined-table -> null -> {}), so a genuine read failure or an incomplete read
+        // throws out to the 500 below instead of being swallowed into "no stay history".
+        const nightsMap: Record<string, number> = (await loadRoomStayNights(supabase)) ?? {};
 
         // Build lookup maps
         // room_number → uuid (for pre-migration feature lookups)
@@ -97,8 +95,6 @@ export async function GET() {
         const detailMap: Record<string, any> = {};
         for (const d of details) detailMap[d.room_id] = d;
 
-        const nightsMap: Record<string, number> = {};
-        for (const s of stayHistory) nightsMap[s.room_id] = (nightsMap[s.room_id] || 0) + 1;
 
         const formattedRooms = (rooms ?? []).map((r: any) => {
             const roomNumber = String(r.room_number ?? "");

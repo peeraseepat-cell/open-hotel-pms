@@ -100,6 +100,11 @@ export async function getWizardDraft(supabase: SupabaseClientLike, groupId: stri
   return data ?? null;
 }
 
+export class WizardDraftRevisionConflictError extends Error {
+  readonly code = "DRAFT_REVISION_CONFLICT";
+  constructor() { super("This draft changed in another tab. Reload and try again."); }
+}
+
 export async function upsertWizardDraft(params: {
   supabase: SupabaseClientLike;
   groupId: string;
@@ -108,6 +113,7 @@ export async function upsertWizardDraft(params: {
   currentStep?: number;
   draftJson?: Record<string, unknown>;
   touchCommittedAt?: boolean;
+  expectedRevision?: string;
 }): Promise<any> {
   const payload: Record<string, unknown> = {
     booking_group_id: params.groupId,
@@ -118,14 +124,24 @@ export async function upsertWizardDraft(params: {
   if (params.draftJson) payload.draft_json = params.draftJson;
   if (params.touchCommittedAt) payload.last_committed_at = new Date().toISOString();
 
-  const { data, error } = await params.supabase
-    .from("group_checkin_wizard_drafts")
-    .upsert(payload, { onConflict: "booking_group_id,business_date" })
+  const query = params.expectedRevision !== undefined
+    ? params.supabase.from("group_checkin_wizard_drafts").update(payload)
+        .eq("booking_group_id", params.groupId).eq("business_date", params.businessDate)
+        .eq("updated_at", params.expectedRevision)
+    : params.supabase.from("group_checkin_wizard_drafts").upsert(payload, { onConflict: "booking_group_id,business_date" });
+  const { data, error } = await query
     .select("id, booking_group_id, business_date, status, current_step, draft_json, last_committed_at, created_at, updated_at")
     .maybeSingle();
 
   if (error) throw new Error(error.message);
+  if (!data && params.expectedRevision !== undefined) throw new WizardDraftRevisionConflictError();
   return data;
+}
+
+export async function updateWizardDraftAtRevision(
+  params: Parameters<typeof upsertWizardDraft>[0] & { expectedRevision: string }
+): Promise<any> {
+  return upsertWizardDraft(params);
 }
 
 export async function getSelectedReservationIdsFromDraft(

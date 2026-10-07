@@ -18,6 +18,7 @@ import {
   resolveLogbookActorStaffId,
 } from "@/lib/logbook-api";
 import { hydrateLogbookNotes, LOGBOOK_NOTE_SELECT, LogbookNoteRow } from "@/lib/logbook-query";
+import { buildQuotedIlikeOrFilter } from "@/lib/postgrest-escape";
 import { requireStaffAuth } from "@/lib/server-auth";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 import { NextRequest, NextResponse } from "next/server";
@@ -201,7 +202,7 @@ export async function GET(request: NextRequest) {
     if (staff_id) query = query.eq("created_by", staff_id);
     if (typeList.length === 1) query = query.eq("note_type", typeList[0]);
     if (typeList.length > 1) query = query.in("note_type", typeList);
-    if (q) query = query.or(`title.ilike.%${q}%,body.ilike.%${q}%`);
+    if (q) query = query.or(buildQuotedIlikeOrFilter(["title", "body"], q));
     if (!past && !archived && date) {
       const { from, to } = getBangkokDayWindow(date);
       query = query

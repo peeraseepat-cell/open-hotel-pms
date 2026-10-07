@@ -91,7 +91,7 @@ export async function PUT(
           {
             success: false,
             error:
-              "DB migration required: apply 202603290002_inventory_display_order.sql before updating products.",
+              "DB migration required: apply 20260329000299_inventory_display_order.sql before updating products.",
           },
           { status: 500 }
         );
@@ -165,7 +165,7 @@ export async function DELETE(
           {
             success: false,
             error:
-              "DB migration required: apply 202603290002_inventory_display_order.sql before updating products.",
+              "DB migration required: apply 20260329000299_inventory_display_order.sql before updating products.",
           },
           { status: 500 }
         );

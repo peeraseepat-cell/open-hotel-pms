@@ -1,4 +1,4 @@
-import { createServerSupabaseClient } from "@/lib/supabase/server";
+import { maintenanceApiError, requireMaintenanceAccess } from "@/lib/maintenance/api-auth";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
@@ -20,6 +20,7 @@ export async function PUT(
   context: { params: { id: string } }
 ) {
   try {
+    const { supabase } = await requireMaintenanceAccess(request, "write");
     const parsedParams = paramsSchema.safeParse(context.params);
     if (!parsedParams.success) {
       return NextResponse.json(
@@ -38,7 +39,6 @@ export async function PUT(
     }
 
     const taskId = parsedParams.data.id;
-    const supabase = createServerSupabaseClient();
 
     const { data: task, error: taskError } = await supabase
       .from("maintenance_tasks")
@@ -81,7 +81,8 @@ export async function PUT(
 
     return NextResponse.json({ success: true });
   } catch (err) {
-    console.error("maintenance/tasks/[id]/times PUT unexpected", err);
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    const { status, message } = maintenanceApiError(err);
+    if (status >= 500) console.error("maintenance/tasks/[id]/times PUT unexpected", err);
+    return NextResponse.json({ error: message }, { status });
   }
 }

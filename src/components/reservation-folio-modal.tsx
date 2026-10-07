@@ -11,6 +11,7 @@ import { PAYMENT_METHODS } from "@/lib/constants";
 import { formatMoney, fromSatang, toSatang } from "@/lib/money";
 import { applyDefaultTransferSender } from "@/lib/transfer-detail";
 import { getExactTransferDepositSplit } from "@/lib/transfer-deposit-split";
+import { canEditFolioPaymentMethod } from "@/lib/folio-payment-method-edit";
 import type { PaymentMethod, ReservationFolioLedgerRow, ReservationFolioResponse } from "@/lib/types";
 import {
   buildTransferDetailPayload,
@@ -35,6 +36,7 @@ interface ReservationFolioModalProps {
   reservationId: string;
   mode: BookingMode;
   isReadonly?: boolean;
+  allowPaymentMethodEdit?: boolean;
   totalPrice: number;
   depositAmount: number;
   billingData: BillingData | null;
@@ -127,6 +129,7 @@ export function ReservationFolioModal({
   reservationId,
   mode,
   isReadonly = false,
+  allowPaymentMethodEdit = false,
   totalPrice,
   depositAmount,
   billingData,
@@ -237,17 +240,15 @@ export function ReservationFolioModal({
   const canPostCharge = open && !!reservationId && !isReadonly && mode === "inhouse";
   const canOpenSettlement = open && !!reservationId && !isReadonly && mode === "checkout";
   const canEditPaymentMethod = useCallback(
-    (row: ReservationFolioLedgerRow) => {
-      if (isReadonly || !reservationId) return false;
-      if (row.type !== "payment" && row.type !== "deposit") return false;
-      if (row.tx_type !== "payment" && row.tx_type !== "deposit") return false;
-      if (!isOperatorPaymentMethod(row.method)) return false;
-      if (row.paid_date !== businessDate) return false;
-      if (row.is_record_only || row.is_void_reversal || row.is_correction || row.void_of) return false;
-      if (voidedRowIds.has(row.id)) return false;
-      return true;
-    },
-    [businessDate, isReadonly, reservationId, voidedRowIds]
+    (row: ReservationFolioLedgerRow) =>
+      canEditFolioPaymentMethod(row, {
+        hasReservation: Boolean(reservationId),
+        businessDate,
+        ledgerReadonly: isReadonly,
+        allowMethodEditWhenReadonly: allowPaymentMethodEdit,
+        isVoided: voidedRowIds.has(row.id),
+      }),
+    [allowPaymentMethodEdit, businessDate, isReadonly, reservationId, voidedRowIds]
   );
   const depositHeld = folio?.summary.deposit_held ?? 0;
   const depositSplitTargetAmount = fromSatang(Math.max(0, toSatang(depositAmount) - toSatang(depositHeld)));

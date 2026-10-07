@@ -7,11 +7,9 @@ export const fetchCache = "force-no-store";
 
 export async function GET(request: NextRequest) {
   const secret = String(process.env.CRON_SECRET ?? "").trim();
-  if (secret) {
-    const auth = request.headers.get("authorization") ?? "";
-    if (auth !== `Bearer ${secret}`) {
-      return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 });
-    }
+  const auth = request.headers.get("authorization") ?? "";
+  if (!secret || auth !== `Bearer ${secret}`) {
+    return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 });
   }
 
   try {

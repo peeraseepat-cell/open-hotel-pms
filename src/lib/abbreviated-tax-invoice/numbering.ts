@@ -8,6 +8,13 @@ type NumberedDraft = {
   predicted_invoice_no: string;
 };
 
+type PersistedInvoiceIdentity = {
+  id: string;
+  source_type: AbbreviatedSourceType;
+  issue_date: string;
+  channel_group: ChannelGroup | null;
+};
+
 function thaiYearYY(issueDate: string): string {
   const year = Number(issueDate.slice(0, 4));
   const beYear = year + 543;
@@ -40,6 +47,34 @@ export function computeAbbreviatedInvoiceNo(
 function sequenceGroupKey(draft: NumberedDraft): string {
   if (draft.source_type === "room") return `${draft.source_type}:${draft.channel_group ?? ""}`;
   return draft.source_type;
+}
+
+function invoiceIdentityKey(invoice: Omit<NumberedDraft, "predicted_invoice_no">): string {
+  if (invoice.source_type === "room") {
+    return `${invoice.source_type}::${invoice.issue_date}::${invoice.channel_group ?? ""}`;
+  }
+  if (invoice.source_type === "dayuse") return `${invoice.source_type}::period`;
+  return `${invoice.source_type}::${invoice.issue_date}`;
+}
+
+export function planAbbreviatedInvoiceRenumbering(
+  existingInvoices: PersistedInvoiceIdentity[],
+  drafts: NumberedDraft[]
+): { assignments: Array<{ id: string; invoice_no: string }>; stale_ids: string[] } {
+  const draftByKey = new Map(drafts.map((draft) => [invoiceIdentityKey(draft), draft]));
+  const assignments: Array<{ id: string; invoice_no: string }> = [];
+  const staleIds: string[] = [];
+
+  for (const invoice of existingInvoices) {
+    const draft = draftByKey.get(invoiceIdentityKey(invoice));
+    if (!draft) {
+      staleIds.push(invoice.id);
+      continue;
+    }
+    assignments.push({ id: invoice.id, invoice_no: draft.predicted_invoice_no });
+  }
+
+  return { assignments, stale_ids: staleIds };
 }
 
 export function assignSequentialInvoiceNumbers<T extends NumberedDraft>(drafts: T[]): T[] {

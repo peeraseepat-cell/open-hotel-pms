@@ -1,4 +1,7 @@
 import { toBangkokDateString } from "@/lib/audit-utils";
+import { fetchAllRowsComplete } from "@/lib/complete-fetch";
+import { compareIssuedInvoiceNewestFirst } from "@/lib/issued-invoice-order";
+import { extractReservationIdsFromBookingSnapshot } from "@/lib/tax-invoice/service";
 
 type SupabaseLike = {
   from: (table: string) => any;
@@ -413,6 +416,17 @@ export function combineMonthlyAuditSummaries(
   };
 }
 
+// `compareIssuedInvoiceNewestFirst` restores `issue_date DESC, id ASC` after a
+// keyset fetch — the pager orders by its cursor column (`id`) because keyset paging
+// requires the cursor to be the primary sort, so any consumer that depended on the
+// old SQL ordering has to re-apply it here. Both callers below do depend on it, in
+// ways that change reported money rather than just presentation.
+//
+// It lives in ./issued-invoice-order.ts rather than here so the ORDER can be tested
+// against fixtures. While it was a private function, the only available assertion
+// was that a sort was called: a review flipped its direction and made it
+// inert, and the full suite stayed green both times.
+
 export async function loadIssuedFullTaxInvoiceMap(
   supabase: SupabaseLike,
   reservationIds: string[]
@@ -421,23 +435,37 @@ export async function loadIssuedFullTaxInvoiceMap(
   const map = new Map<string, MonthlyAuditFullTaxInvoiceInfo>();
   if (ids.length === 0) return map;
 
-  const { data, error } = await supabase
-    .from("invoices")
-    .select("id, reservation_id, invoice_no, issue_date, grand_total, status, booking_snapshot")
-    .eq("status", "issued")
-    .order("issue_date", { ascending: false })
-    .limit(5000);
-
-  if (error) {
-    throw new MonthlyAuditError(`Failed to load full tax invoices: ${error.message}`, 500);
+  let rows: any[];
+  try {
+    rows = await fetchAllRowsComplete<any>(
+      () =>
+        supabase
+          .from("invoices")
+          .select("id, reservation_id, invoice_no, issue_date, grand_total, status, booking_snapshot", {
+            count: "exact",
+          })
+          .eq("status", "issued"),
+      { label: "issued full tax invoices" }
+    );
+  } catch (error) {
+    throw new MonthlyAuditError(
+      `Failed to load full tax invoices: ${error instanceof Error ? error.message : String(error)}`,
+      500
+    );
   }
 
-  for (const row of (data ?? []) as any[]) {
-    const directReservationId = String(row.reservation_id ?? "").trim();
-    const snapshotReservationIds = Array.isArray(row.booking_snapshot?.reservation_ids)
-      ? row.booking_snapshot.reservation_ids.map((id: unknown) => String(id ?? "").trim()).filter(Boolean)
-      : [];
-    const invoiceReservationIds = Array.from(new Set([directReservationId, ...snapshotReservationIds].filter(Boolean)));
+  // LOAD-BEARING, not cosmetic. The loop below is first-write-wins
+  // (`map.has(reservationId)` → skip), so when a reservation carries more than one
+  // issued invoice, whichever row arrives FIRST supplies the grand_total reported
+  // as covering it. Leaving the rows in keyset (id) order would hand the
+  // reservation to a different invoice and change audited money.
+  rows.sort(compareIssuedInvoiceNewestFirst);
+
+  for (const row of rows) {
+    const invoiceReservationIds = extractReservationIdsFromBookingSnapshot(
+      row.booking_snapshot,
+      row.reservation_id
+    );
 
     for (const reservationId of invoiceReservationIds) {
       if (!ids.includes(reservationId) || map.has(reservationId)) continue;
@@ -544,19 +572,41 @@ export async function loadIssuedFullTaxCoverageMap<T extends MonthlyAuditEntry>(
   const map = new Map<string, MonthlyAuditFullTaxInvoiceInfo>();
   if (reservationIds.length === 0) return map;
 
-  const { data, error } = await supabase
-    .from("invoices")
-    .select("id, reservation_id, invoice_no, issue_date, grand_total, status, line_items, booking_snapshot")
-    .eq("status", "issued")
-    .order("issue_date", { ascending: false })
-    .limit(5000);
-
-  if (error) {
-    throw new MonthlyAuditError(`Failed to load full tax invoice coverage: ${error.message}`, 500);
+  let rows: any[];
+  try {
+    rows = await fetchAllRowsComplete<any>(
+      () =>
+        supabase
+          .from("invoices")
+          .select(
+            "id, reservation_id, invoice_no, issue_date, grand_total, status, line_items, booking_snapshot",
+            { count: "exact" }
+          )
+          .eq("status", "issued"),
+      { label: "issued full tax invoice coverage" }
+    );
+  } catch (error) {
+    throw new MonthlyAuditError(
+      `Failed to load full tax invoice coverage: ${error instanceof Error ? error.message : String(error)}`,
+      500
+    );
   }
 
+  // LOAD-BEARING for a different reason than loadIssuedFullTaxInvoiceMap: this
+  // loop ACCUMULATES across rows rather than taking the first. `id` and
+  // `invoice_no` are comma-joined in row order, and `issue_date` is
+  // `previous?.issue_date ?? row.issue_date` — first row wins. So row order
+  // decides both the reported invoice-number string and which issue_date is
+  // shown. Keyset (id) order would reorder both.
+  rows.sort(compareIssuedInvoiceNewestFirst);
+
   const wanted = new Set(reservationIds);
-  for (const row of (data ?? []) as any[]) {
+  for (const row of rows) {
+    // NOT replaced with extractReservationIdsFromBookingSnapshot on purpose: this
+    // order is load-bearing. The `metadataTotal <= 0` branch below distributes
+    // invoiceTotal greedily across relatedEntries in array order, so the direct
+    // reservation_id must stay FIRST. The shared parser returns snapshot ids
+    // first, which would silently re-allocate money on group invoices.
     const directReservationId = str(row.reservation_id);
     const snapshotReservationIds = Array.isArray(row.booking_snapshot?.reservation_ids)
       ? row.booking_snapshot.reservation_ids.map((id: unknown) => str(id)).filter(Boolean)

@@ -32,6 +32,11 @@ export default function FillOcrPage() {
   const [bookingNameNote, setBookingNameNote] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [accomCount, setAccomCount] = useState(0);
+  const [accomIndexes, setAccomIndexes] = useState<number[]>([]);
+  const [partyLoaded, setPartyLoaded] = useState(false);
+  const [partyError, setPartyError] = useState("");
+  const [partyReload, setPartyReload] = useState(0);
+  const nextAccompanyingIndex = (indexes: number[]) => [1, 2, 3].find(index => !indexes.includes(index)) ?? 0;
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Load room info
@@ -49,29 +54,36 @@ export default function FillOcrPage() {
       } catch { /* ignore */ }
     })();
 
-    // Fetch existing accompanying count
+    const controller = new AbortController();
+    setPartyLoaded(false); setPartyError(""); setAccomIndexes([]); setAccomCount(0); setGuestIndex(0);
     (async () => {
       try {
-        const res = await fetch(`/api/reservation-guests?reservation_id=${resId}`);
+        const res = await fetch(`/api/bookings/${resId}/guests`, { signal: controller.signal });
         const json = await res.json().catch(() => null);
-        if (json?.success && Array.isArray(json.data)) {
-          const accCount = json.data.filter((g: any) => g.role === "accompanying").length;
-          setAccomCount(accCount);
-          if (isInHouse) setGuestIndex(accCount + 1);
-        }
-      } catch { /* ignore */ }
+        if (!res.ok || !json?.success || !Array.isArray(json.guests)) throw new Error(json?.error || "Could not load accompanying guests.");
+        if (controller.signal.aborted) return;
+        const accompanying = json.guests.filter((guest: any) => guest.role === "accompanying");
+        const indexes = accompanying.map((guest: any) => Number(guest.display_order) - 1);
+        if (indexes.some((index: number) => !Number.isInteger(index) || index < 1 || index > 3) || new Set(indexes).size !== indexes.length) throw new Error("Existing guest slots are invalid. Check the booking before scanning.");
+        setAccomIndexes(indexes); setAccomCount(accompanying.length); setPartyLoaded(true);
+        if (isInHouse) setGuestIndex(nextAccompanyingIndex(indexes));
+      } catch (loadError) {
+        if (!controller.signal.aborted) setPartyError(loadError instanceof Error ? loadError.message : "Could not load accompanying guests.");
+      }
     })();
-  }, [resId, isInHouse]);
+    return () => controller.abort();
+  }, [resId, isInHouse, partyReload]);
 
   const selectTarget = (t: FillTarget) => {
     setTarget(t);
-    setGuestIndex(t === "main" ? 0 : accomCount + 1);
+    setGuestIndex(t === "main" ? 0 : nextAccompanyingIndex(accomIndexes));
     setStep("upload");
   };
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    if (target === "accompanying" && (!partyLoaded || !guestIndex)) { setError(partyError || "Load the guest list before scanning."); return; }
 
     if (!file.type.startsWith("image/")) {
       setError("กรุณาอัพโหลดไฟล์รูปภาพ");
@@ -109,6 +121,7 @@ export default function FillOcrPage() {
 
       if (target === "accompanying") {
         setAccomCount((prev) => prev + 1);
+        setAccomIndexes(prev => [...prev, Number(json.data.guest_index)]);
       }
 
       setStep("complete");
@@ -123,7 +136,7 @@ export default function FillOcrPage() {
 
   const addAnotherAccom = () => {
     setTarget("accompanying");
-    setGuestIndex(accomCount + 1);
+    setGuestIndex(nextAccompanyingIndex(accomIndexes));
     setOcrResult(null);
     setBookingNameNote(null);
     setError("");
@@ -132,6 +145,7 @@ export default function FillOcrPage() {
 
   return (
     <div className="flex flex-col min-h-screen bg-[var(--bg-muted)]">
+      {partyError && <div role="alert" className="p-4 text-red-700">{partyError} <button type="button" onClick={() => setPartyReload(value => value + 1)}>Retry guest list</button></div>}
       <header className="px-6 py-4 border-b border-[var(--border-default)] bg-[var(--bg-surface)] sticky top-0 z-10">
         <div className="flex items-center gap-4">
           <Link
@@ -183,7 +197,7 @@ export default function FillOcrPage() {
 
             <button
               onClick={() => selectTarget("accompanying")}
-              disabled={accomCount >= 3}
+              disabled={!partyLoaded || accomCount >= 3}
               className="w-full max-w-sm bg-[var(--bg-surface)] border-2 border-indigo-500/30 rounded-2xl p-6 flex items-center gap-4 hover:bg-indigo-50 dark:hover:bg-indigo-500/10 active:scale-[0.98] transition disabled:opacity-40 disabled:cursor-not-allowed"
             >
               <div className="w-14 h-14 bg-indigo-100 dark:bg-indigo-500/20 rounded-full flex items-center justify-center text-indigo-600 dark:text-indigo-400">
@@ -211,7 +225,7 @@ export default function FillOcrPage() {
                   : "bg-indigo-100 text-indigo-700 dark:bg-indigo-500/20 dark:text-indigo-400"
               }`}>
                 {target === "main" ? <User className="w-3 h-3" /> : <Users className="w-3 h-3" />}
-                {target === "main" ? "Main Guest" : `Accompanying #${accomCount + 1}`}
+                {target === "main" ? "Main Guest" : `Accompanying #${guestIndex}`}
               </div>
               <h2 className="text-2xl font-black text-[var(--text-primary)]">Upload Passport</h2>
               <p className="text-sm font-medium text-[var(--text-secondary)] max-w-[280px] mx-auto">
@@ -223,6 +237,7 @@ export default function FillOcrPage() {
             </div>
 
             <button
+              disabled={target === "accompanying" && (!partyLoaded || guestIndex === 0)}
               onClick={() => fileInputRef.current?.click()}
               className="w-36 h-36 bg-brand-600 rounded-full flex items-center justify-center text-white shadow-xl shadow-brand-500/30 hover:bg-brand-700 active:scale-95 transition-all outline outline-[12px] outline-brand-500/10"
             >

@@ -243,6 +243,7 @@ export default function MobileBatchWizardPage() {
             <div className="flex-1">
                 {currentStep === 1 && (
                     <MobileBatchStepDirty
+            key={activeDraftKey ?? batchId ?? "new"}
                         initialData={draftData}
                         draftKey={activeDraftKey}
                         batchId={batchId}

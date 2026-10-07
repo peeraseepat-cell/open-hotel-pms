@@ -7,10 +7,12 @@ import {
     resolveBusinessDate,
 } from "@/lib/folio-fees";
 import { computeCheckoutNetPaidSatang, computeExtraChargeNetSatang } from "@/lib/checkout-balance";
+import { resolveCheckoutReleaseStartDate } from "@/lib/checkout-night-release";
 import { formatMoney, fromSatang, toSatang } from "@/lib/money";
 import { computeReservationDiscountAmount } from "@/lib/reservation-visible-total";
 import { syncDynamicRoomLinksForReservation } from "@/lib/logbook-api";
 import { syncBookingGroupStatusById } from "@/lib/booking-group-status";
+import { requireStaffAuth } from "@/lib/server-auth";
 import { normalizeAuditSource } from "@/lib/audit-utils";
 import { markRoomDirtyTask } from "@/lib/hk-dirty";
 import { markReservationVehiclesCheckedOut } from "@/lib/vehicles";
@@ -235,7 +237,7 @@ async function findCheckoutRoomNight(
 async function releaseUnusedReservationNightsAfterCheckout(
     supabase: ReturnType<typeof createServerSupabaseClient>,
     reservationIds: string[],
-    businessDate: string,
+    releaseStartDate: string,
     cancelledAt: string
 ): Promise<number> {
     const ids = Array.from(new Set(reservationIds.filter(Boolean)));
@@ -245,7 +247,7 @@ async function releaseUnusedReservationNightsAfterCheckout(
         .from("reservation_nights")
         .update({ cancelled_at: cancelledAt })
         .in("reservation_id", ids)
-        .gte("stay_date", businessDate)
+        .gte("stay_date", releaseStartDate)
         .is("cancelled_at", null)
         .select("id");
 
@@ -383,6 +385,9 @@ export async function POST(
 ) {
     try {
         const supabase = createServerSupabaseClient();
+        const auth = await requireStaffAuth(supabase, request, { allowRoles: ["admin", "supervisor", "frontdesk"] });
+        if (auth.error) return auth.error;
+
         const reservationId = params.id;
         const body = await request.json().catch(() => ({}));
 
@@ -536,6 +541,10 @@ export async function POST(
         const calendarDate = toLocalDate(nowDate);
         const businessDate = await resolveBusinessDate(supabase, calendarDate);
         const checkoutRoomNight = await findCheckoutRoomNight(supabase, reservationId, businessDate);
+        const releaseStartDate = resolveCheckoutReleaseStartDate(
+            businessDate,
+            checkoutRoomNight?.stay_date ?? null
+        );
 
         // 1. Write folio_payment for checkout (skip if 0)
         if (paymentAmountSatang > 0) {
@@ -597,7 +606,7 @@ export async function POST(
         const releasedFutureNights = await releaseUnusedReservationNightsAfterCheckout(
             supabase,
             linkedCheckoutContext.activeReservationIds,
-            businessDate,
+            releaseStartDate,
             now
         );
 

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import {
   BackupHttpError,
+  canReadBackupConfigPinHash,
   getBackupConfigPublicPayload,
   requireAdminAccess,
   updateBackupConfig,
@@ -21,10 +22,11 @@ const patchSchema = z
     message: "Provide retention_days or offline_pin.",
   });
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
     const supabase = createServerSupabaseClient();
-    const config = await getBackupConfigPublicPayload(supabase);
+    const includePinHash = await canReadBackupConfigPinHash(supabase, request);
+    const config = await getBackupConfigPublicPayload(supabase, { includePinHash });
     return NextResponse.json({ success: true, data: config });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to load backup config.";

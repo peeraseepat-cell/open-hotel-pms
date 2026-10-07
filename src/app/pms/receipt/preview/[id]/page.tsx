@@ -26,7 +26,7 @@ export default function ReceiptPreviewPage() {
         // We'll use the reservation_id stored in the receipt
         const sellerRes = await fetch(`/api/tax-invoice/build-line-items/${receipt.reservation_id}`);
         const sellerResult = await sellerRes.json();
-        const seller = sellerResult?.data?.seller_snapshot ?? {
+        const seller = sellerResult?.seller_snapshot ?? {
           hotel_name: null,
           company_name: null,
           company_name_en: null,

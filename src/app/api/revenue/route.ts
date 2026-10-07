@@ -1,5 +1,6 @@
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 import { resolveBusinessDate } from "@/lib/folio-fees";
+import { requireStaffAuth } from "@/lib/server-auth";
 import {
     summarizeRevenueRange,
     type RevenueDayuseRow,
@@ -8,15 +9,8 @@ import {
     type RevenuePosOrderRow,
     type RevenueRoomRow,
 } from "@/lib/revenue-reporting";
+import { fetchAllRowsComplete } from "@/lib/complete-fetch";
 import { NextRequest, NextResponse } from "next/server";
-
-const REVENUE_REPORT_PAGE_SIZE = 1000;
-const REVENUE_REPORT_MAX_ROWS = 20000;
-
-type RevenueQueryError = { message: string };
-type RevenueRangeQuery<T> = {
-    range(from: number, to: number): PromiseLike<{ data: T[] | null; error: RevenueQueryError | null }>;
-};
 
 function toLocalDate(d: Date) {
     const yyyy = d.getFullYear();
@@ -25,31 +19,12 @@ function toLocalDate(d: Date) {
     return `${yyyy}-${mm}-${dd}`;
 }
 
-async function fetchRevenueRows<T>(
-    createQuery: () => RevenueRangeQuery<T>
-): Promise<{ data: T[] | null; error: RevenueQueryError | null }> {
-    const rows: T[] = [];
-    let offset = 0;
-
-    while (offset < REVENUE_REPORT_MAX_ROWS) {
-        const { data, error } = await createQuery().range(offset, offset + REVENUE_REPORT_PAGE_SIZE - 1);
-        if (error) return { data: null, error };
-
-        const page = data ?? [];
-        rows.push(...page);
-        if (page.length < REVENUE_REPORT_PAGE_SIZE) return { data: rows, error: null };
-        offset += REVENUE_REPORT_PAGE_SIZE;
-    }
-
-    return {
-        data: null,
-        error: { message: `Revenue report exceeded ${REVENUE_REPORT_MAX_ROWS} rows. Narrow the date range.` },
-    };
-}
-
 export async function GET(request: NextRequest) {
     try {
         const supabase = createServerSupabaseClient();
+        const auth = await requireStaffAuth(supabase, request);
+        if (auth.error) return auth.error;
+
         const sp = request.nextUrl.searchParams;
 
         const fallbackDate = toLocalDate(new Date());
@@ -57,14 +32,19 @@ export async function GET(request: NextRequest) {
         const startDate = (sp.get("start") ?? "").trim() || businessDate;
         const endDate = (sp.get("end") ?? "").trim() || businessDate;
 
-        const [{ data: rooms, error: roomsErr }, { data: nights, error: nightsErr }, { data: posOrders, error: posErr }, { data: extraRows, error: extraErr }, { data: dayuseRows, error: dayuseErr }] = await Promise.all([
+        // Every range-scoped read below pages by KEYSET, not by offset. Offset paging
+        // without a total ORDER BY duplicates and skips rows across page boundaries, so
+        // a range wide enough to cross 1000 rows returned revenue that was WRONG rather
+        // than obviously missing. `id` leads each projection because it is the cursor;
+        // `count: "exact"` is what lets the pager certify it read the whole set.
+        const [{ data: rooms, error: roomsErr }, nights, posOrders, extraRows, dayuseRows] = await Promise.all([
             supabase
                 .from("rooms")
                 .select("id, room_number, floor_number, is_dayuse, closure_reason, is_sellable")
                 .eq("is_sellable", true),
-            fetchRevenueRows<RevenueNightRow>(() => supabase
+            fetchAllRowsComplete<RevenueNightRow>(() => supabase
                 .from("reservation_nights")
-                .select(`
+                .select(`id,
         room_id,
         stay_date,
         nightly_price,
@@ -75,37 +55,33 @@ export async function GET(request: NextRequest) {
           status,
           is_dayuse
         )
-      `)
+      `, { count: "exact" })
                 .gte("stay_date", startDate)
                 .lte("stay_date", endDate)
-                .neq("reservations.status", "cancelled")),
-            fetchRevenueRows<RevenuePosOrderRow>(() => supabase
+                .neq("reservations.status", "cancelled"), { label: "revenue nights" }),
+            fetchAllRowsComplete<RevenuePosOrderRow>(() => supabase
                 .from("pos_orders")
-                .select("total, order_date, status")
+                .select("id, total, order_date, status", { count: "exact" })
                 .gte("order_date", startDate)
                 .lte("order_date", endDate)
-                .eq("status", "completed")),
-            fetchRevenueRows<RevenueExtraRow>(() => supabase
+                .eq("status", "completed"), { label: "revenue POS orders" }),
+            fetchAllRowsComplete<RevenueExtraRow>(() => supabase
                 .from("folio_payments")
-                .select("id, paid_date, paid_at, tx_type, amount, note, revenue_category, is_record_only, is_correction, is_void_reversal, void_of")
+                .select("id, paid_date, paid_at, tx_type, amount, note, revenue_category, is_record_only, is_correction, is_void_reversal, void_of", { count: "exact" })
                 .gte("paid_date", startDate)
                 .lte("paid_date", endDate)
                 .eq("revenue_category", "extra_charge")
-                .in("tx_type", ["payment", "refund"])),
-            fetchRevenueRows<RevenueDayuseRow>(() => supabase
+                .in("tx_type", ["payment", "refund"]), { label: "revenue extra charges" }),
+            fetchAllRowsComplete<RevenueDayuseRow>(() => supabase
                 .from("folio_payments")
-                .select("id, reservation_id, paid_date, paid_at, tx_type, amount, note, revenue_category, is_record_only, is_correction, is_void_reversal, void_of")
+                .select("id, reservation_id, paid_date, paid_at, tx_type, amount, note, revenue_category, is_record_only, is_correction, is_void_reversal, void_of", { count: "exact" })
                 .gte("paid_date", startDate)
                 .lte("paid_date", endDate)
                 .eq("revenue_category", "dayuse_revenue")
-                .in("tx_type", ["payment", "refund"])),
+                .in("tx_type", ["payment", "refund"]), { label: "revenue day-use" }),
         ]);
 
         if (roomsErr) return NextResponse.json({ error: roomsErr.message }, { status: 500 });
-        if (nightsErr) return NextResponse.json({ error: nightsErr.message }, { status: 500 });
-        if (posErr) return NextResponse.json({ error: posErr.message }, { status: 500 });
-        if (extraErr) return NextResponse.json({ error: extraErr.message }, { status: 500 });
-        if (dayuseErr) return NextResponse.json({ error: dayuseErr.message }, { status: 500 });
 
         const scopedExtraRows = (extraRows ?? []) as RevenueExtraRow[];
         const scopedDayuseRows = (dayuseRows ?? []) as RevenueDayuseRow[];

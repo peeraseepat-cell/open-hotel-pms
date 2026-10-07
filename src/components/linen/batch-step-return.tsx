@@ -6,6 +6,8 @@ import type { LaundryBatchItem, LaundryPendingItem, LaundryReturnSourceItem } fr
 import type { LaundryRewashPendingResponse } from "@/lib/types";
 import { apiDataFetcher } from "@/lib/client/api-fetcher";
 import type { ReturnSummaryDisplayRow } from "@/lib/linen/rewash-summary";
+import { sortReturnSourcesForDisplay } from "@/lib/linen/return-display-order";
+import { dropPendingResolvedCoveredByReturns } from "@/lib/linen/pending-resolve-overlap";
 
 interface BatchStepReturnProps {
     batchId: string;
@@ -49,6 +51,12 @@ export function BatchStepReturn({ batchId, items, returnSources = [], onNext }: 
         if (/^https?:\/\//.test(photoKeyOrUrl) || photoKeyOrUrl.startsWith("blob:")) return photoKeyOrUrl;
         return `/api/linen/rewash/photo/${photoKeyOrUrl.split("/").map(encodeURIComponent).join("/")}`;
     };
+
+    // A1 moved this list off a server query that sorted ascending (date, round) and
+    // onto fn_laundry_return_partition, which emits lane_order + date/round DESC.
+    // This screen renders the payload in payload order, so the list silently
+    // reversed. Restore the legacy order here — one order-sensitive consumer, and
+    const orderedReturnSources = useMemo(() => sortReturnSourcesForDisplay(returnSources), [returnSources]);
 
     const isComplete = useMemo(() => {
         // all source items expected back MUST have an entry in returnData (can be 0)
@@ -147,17 +155,31 @@ export function BatchStepReturn({ batchId, items, returnSources = [], onNext }: 
         try {
             await resolveTypedRewashReturns();
 
-            const returnItemsPayload = returnSources.map(item => ({
+            // ordered, not raw: this array becomes the stored fo_return_counted event,
+            // and toReturnSummaryRows reads the LINE text's row order from that event.
+            const returnItemsPayload = orderedReturnSources.map(item => ({
                 source_batch_id: item.source_batch_id,
                 linen_item_id: item.linen_item_id,
                 received_qty: parseInt(returnData[item.id] || "0", 10),
                 is_dayuse: item.is_dayuse,
             }));
 
+            // F1: legacy ran the two passes sequentially — the return_items pass closed
+            // the marker, then resolvePendingItems looked it up with resolved_at is null,
+            // found nothing and hit `if (!pending) continue` (pending-service.ts:220).
+            // A silent skip; the press succeeded. The atomic RPC rejects the same overlap
+            // with 22023 and rolls the whole press back, so a press that worked yesterday
+            // stops working. Restore the legacy outcome by not sending the marker.
+            const safePendingResolved = dropPendingResolvedCoveredByReturns(
+                resolvedPending,
+                returnItemsPayload,
+                pendingItems ?? []
+            );
+
             const payload = {
                 step: "fo_return_counted",
                 return_items: returnItemsPayload,
-                pending_resolved: resolvedPending.map(id => ({ pending_item_id: id }))
+                pending_resolved: safePendingResolved.map(id => ({ pending_item_id: id }))
             };
 
             const res = await fetch(`/api/linen/batches/${batchId}/step`, {
@@ -167,7 +189,7 @@ export function BatchStepReturn({ batchId, items, returnSources = [], onNext }: 
             });
 
             if (!res.ok) throw new Error("Failed to submit return counts");
-            const returnedSummary: ReturnSummaryDisplayRow[] = returnSources
+            const returnedSummary: ReturnSummaryDisplayRow[] = orderedReturnSources
                 .map((item) => ({
                     name: item.name_th ?? `Item ${item.linen_item_id}`,
                     qty: parseInt(returnData[item.id] || "0", 10),
@@ -193,13 +215,13 @@ export function BatchStepReturn({ batchId, items, returnSources = [], onNext }: 
     };
 
     const displayItems = useMemo(() => {
-        return returnSources.map(i => ({
+        return orderedReturnSources.map(i => ({
             id: i.id,
             name: i.name_th || `Item ${i.linen_item_id}`,
             sent: i.remaining_qty,
             sourceLabel: `${i.source_business_date} #${i.source_pickup_round}`,
         }));
-    }, [returnSources]);
+    }, [orderedReturnSources]);
 
     return (
         <div className="w-full relative">

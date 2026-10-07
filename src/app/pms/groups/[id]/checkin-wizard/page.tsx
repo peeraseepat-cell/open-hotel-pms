@@ -174,6 +174,7 @@ type GuestSearchResult = {
 type ScanPoolSource = "thai_id" | "passport_ocr" | "search";
 
 type ScannedPoolItem = GuestSearchResult & {
+  scan_id?: string | null;
   source: ScanPoolSource;
   scan_order: number;
   display_name: string | null;
@@ -473,6 +474,7 @@ export default function GroupCheckinWizardPage({ params }: { params: { id: strin
   const [masterDepositEdited, setMasterDepositEdited] = useState(false);
   const [confirmResults, setConfirmResults] = useState<ConfirmRoomResult[] | null>(null);
   const [wizardDraftJson, setWizardDraftJson] = useState<Record<string, any>>({});
+  const [wizardDraftRevision, setWizardDraftRevision] = useState("");
 
   const [guestQuery, setGuestQuery] = useState("");
   const [searchingGuests, setSearchingGuests] = useState(false);
@@ -666,12 +668,14 @@ export default function GroupCheckinWizardPage({ params }: { params: { id: strin
       });
     });
 
+    const scanById = new Map<string, string>();
     const sourceById = new Map<string, ScanPoolSource>();
     const orderById = new Map<string, number>();
     const displayById = new Map<string, string>();
     draftStep2Pool.forEach((item: any, idx: number) => {
       const profileId = String(item?.guest_profile_id ?? "").trim();
       if (!profileId) return;
+      if (item?.scan_id) scanById.set(profileId, String(item.scan_id));
       const sourceRaw = String(item?.source ?? "search").trim() as ScanPoolSource;
       sourceById.set(
         profileId,
@@ -684,6 +688,7 @@ export default function GroupCheckinWizardPage({ params }: { params: { id: strin
       if (snapshotName) displayById.set(profileId, snapshotName);
     });
     preservedPool.forEach((item, idx) => {
+      if (item.scan_id) scanById.set(item.id, item.scan_id);
       sourceById.set(item.id, item.source);
       orderById.set(item.id, Number.isFinite(Number(item.scan_order)) ? Number(item.scan_order) : idx + 1);
       const displayName = String(item.display_name ?? guestDisplayName(item)).trim();
@@ -708,6 +713,7 @@ export default function GroupCheckinWizardPage({ params }: { params: { id: strin
             profile_status: null,
             nationality_code: null,
           }),
+          scan_id: scanById.get(id) ?? null,
           source: sourceById.get(id) ?? "search",
           scan_order: orderById.get(id) ?? idx + 1,
           display_name: displayById.get(id) ?? known?.first_name ?? id,
@@ -734,6 +740,7 @@ export default function GroupCheckinWizardPage({ params }: { params: { id: strin
         ? data.draft.draft_json
         : {};
     setWizardDraftJson(draftJson);
+    setWizardDraftRevision(String(data?.draft?.updated_at ?? ""));
     const rows = buildReservationRows(data);
     setReservations(rows);
     hydrateScannedPoolFromDraft(rows, draftJson, options?.preserveScannedPool ?? scannedGuestPool);
@@ -769,6 +776,7 @@ export default function GroupCheckinWizardPage({ params }: { params: { id: strin
         ? data.draft.draft_json
         : {};
     setWizardDraftJson(draftJson);
+    setWizardDraftRevision(String(data?.draft?.updated_at ?? ""));
     setReservations(rows);
     hydrateScannedPoolFromDraft(rows, draftJson);
 
@@ -1053,6 +1061,7 @@ export default function GroupCheckinWizardPage({ params }: { params: { id: strin
             ? data.draft.draft_json
             : {};
         setWizardDraftJson(draftJson);
+    setWizardDraftRevision(String(data?.draft?.updated_at ?? ""));
 
         const rows = buildReservationRows(data);
         setReservations(rows);
@@ -1150,6 +1159,7 @@ export default function GroupCheckinWizardPage({ params }: { params: { id: strin
 
   async function saveDraft(current: number, redirect: boolean) {
     const payload = {
+      draft_revision: wizardDraftRevision,
       business_date: businessDate,
       current_step: current,
       draft_json: {
@@ -1160,6 +1170,7 @@ export default function GroupCheckinWizardPage({ params }: { params: { id: strin
         step2: {
           scanned_pool: scannedGuestPool.map((guest) => ({
             guest_profile_id: guest.id,
+            scan_id: guest.scan_id ?? null,
             source: guest.source,
             scan_order: guest.scan_order,
             display_name: guestDisplayName(guest),
@@ -1207,6 +1218,7 @@ export default function GroupCheckinWizardPage({ params }: { params: { id: strin
     if (!response.ok || !data?.success) {
       throw new Error(data?.error || "Failed to save draft.");
     }
+    setWizardDraftRevision(String(data?.draft?.updated_at ?? ""));
   }
 
   async function handleSaveAndExit() {

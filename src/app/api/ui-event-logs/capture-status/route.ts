@@ -4,6 +4,7 @@ import { getAuthenticatedUser } from "@/lib/server-auth";
 import { isUiEventLogEmailAllowed } from "@/lib/ui-event-log-settings";
 
 export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
 
 export async function GET(request: NextRequest) {
   const strictMode = process.env.NEXT_PUBLIC_EGRESS_STRICT_MODE !== "false";

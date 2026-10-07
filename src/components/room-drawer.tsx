@@ -38,6 +38,7 @@ export type RoomDrawerRoom = {
         guest_name: string;
         phone?: string | null;
         room_type_id?: string | null;
+        parent_reservation_id?: string | null;
         source: BookingSource;
         checkin_date: string;
         checkout_date: string;
@@ -587,7 +588,22 @@ export default function RoomDrawer({ room, onClose, onRefresh, onDayUseCheckin }
     const canCheckIn = Boolean(res && diaryState === "due_in");
     const canCheckOut = Boolean(res && (diaryState === "due_out" || diaryState === "back_to_back"));
     const canCancel = Boolean(res && diaryState === "due_in");
-    const canInHouseActions = Boolean(res && (diaryState === "inhouse" || diaryState === "due_out" || diaryState === "back_to_back"));
+    const canActivatePendingLinkedWalkIn = Boolean(
+        res &&
+        diaryState === "due_in" &&
+        res?.source === "walkin" &&
+        res?.parent_reservation_id &&
+        res.checkin_date === getThailandDateString()
+    );
+    const canInHouseActions = Boolean(
+        res &&
+        (
+            diaryState === "inhouse" ||
+            diaryState === "due_out" ||
+            diaryState === "back_to_back" ||
+            canActivatePendingLinkedWalkIn
+        )
+    );
     const canOptions = Boolean(res);
     const canMoveRoom = Boolean(canInHouseActions && res?.room_type_id);
     const assignedLockActive = Boolean(res?.do_not_move_assigned_room);

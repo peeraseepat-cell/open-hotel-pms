@@ -1,6 +1,6 @@
 import { normalizeAuditSource, toBangkokDateString } from "@/lib/audit-utils";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
-import { getAuthenticatedUser } from "@/lib/server-auth";
+import { getAuthenticatedUser, requireStaffAuth } from "@/lib/server-auth";
 import { syncStaffFromProfiles } from "@/lib/staff-sync";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
@@ -362,9 +362,11 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const supabase = createServerSupabaseClient();
-    const user = await getAuthenticatedUser(supabase, request);
-    // Legacy PMS mode
-    void user;
+    // Creating a manual staff/lane member is a management mutation: gate to admin/supervisor,
+    // matching /api/staff/invite. (GET above stays open — the staff list is read everywhere.)
+    const auth = await requireStaffAuth(supabase, request, { allowRoles: ["admin", "supervisor"] });
+    if (auth.error) return auth.error;
+    const user = auth.user;
 
     const json = await request.json().catch(() => null);
     const parsed = createSchema.safeParse(json);

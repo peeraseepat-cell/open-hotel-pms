@@ -1,4 +1,5 @@
-import { createServerSupabaseClient } from "@/lib/supabase/server";
+import { maintenanceApiError, requireMaintenanceAccess } from "@/lib/maintenance/api-auth";
+import { normalizeAuditSource, toBangkokDateString } from "@/lib/audit-utils";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
@@ -8,10 +9,11 @@ const querySchema = z.object({
   limit: z.coerce.number().int().min(1).max(500).optional(),
 });
 
+// performed_by is deliberately absent: it is stamped server-side from the
+// authenticated actor. A client does not get to choose who it was.
 const createLogSchema = z.object({
   room_id: z.string().uuid("room_id is required"),
   task_id: z.string().uuid("task_id is required"),
-  performed_by: z.string().trim().max(120).optional(),
   notes: z.string().trim().max(2000).optional(),
   assignment_id: z.string().uuid().optional(),
 });
@@ -32,6 +34,7 @@ function getThailandDateString(date = new Date()): string {
 
 export async function GET(request: NextRequest) {
   try {
+    const { supabase } = await requireMaintenanceAccess(request, "read");
     const parsedQuery = querySchema.safeParse({
       room_id: request.nextUrl.searchParams.get("room_id") ?? undefined,
       task_id: request.nextUrl.searchParams.get("task_id") ?? undefined,
@@ -46,7 +49,6 @@ export async function GET(request: NextRequest) {
     }
 
     const { room_id, task_id, limit } = parsedQuery.data;
-    const supabase = createServerSupabaseClient();
 
     let query = supabase
       .from("maintenance_logs")
@@ -80,13 +82,15 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({ success: true, logs });
   } catch (err) {
-    console.error("maintenance/logs GET unexpected", err);
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    const { status, message } = maintenanceApiError(err);
+    if (status >= 500) console.error("maintenance/logs GET unexpected", err);
+    return NextResponse.json({ error: message }, { status });
   }
 }
 
 export async function POST(request: NextRequest) {
   try {
+    const { supabase, actor } = await requireMaintenanceAccess(request, "write");
     const body = await request.json().catch(() => null);
     const parsedBody = createLogSchema.safeParse(body);
 
@@ -98,7 +102,6 @@ export async function POST(request: NextRequest) {
     }
 
     const payload = parsedBody.data;
-    const supabase = createServerSupabaseClient();
     const normalizedNote = payload.notes?.trim() || null;
 
     const { data: room, error: roomError } = await supabase
@@ -126,7 +129,7 @@ export async function POST(request: NextRequest) {
         room_id: payload.room_id,
         task_id: payload.task_id,
         performed_at: completedAt,
-        performed_by: payload.performed_by ?? null,
+        performed_by: actor.name,
         notes: normalizedNote ?? "Marked done via Maintenance Hub",
       })
       .select("id, room_id, task_id, performed_at, performed_by, stay_count_at_time, notes")
@@ -186,6 +189,30 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    // Audit is a record, not a gate: a failed audit write must not fail the
+    // mutation that already succeeded (same posture as HK finish and tips).
+    const { error: auditError } = await supabase.from("audit_logs").insert({
+      action: "maintenance_log_created",
+      entity_type: "maintenance_logs",
+      entity_id: String(effectiveLog?.id ?? ""),
+      after_json: {
+        room_id: payload.room_id,
+        task_id: payload.task_id,
+        performed_at: completedAt,
+        performed_by: actor.name,
+        notes: effectiveLog?.notes ?? null,
+        completed_assignment_count: completedAssignmentCount,
+        actor_role: actor.role,
+      },
+      change_reason: "maintenance task marked done",
+      actor_user_id: actor.userId,
+      business_date: toBangkokDateString(),
+      source: normalizeAuditSource("manual"),
+    });
+    if (auditError) {
+      console.error("maintenance/logs POST audit log failed", auditError);
+    }
+
     return NextResponse.json(
       {
         success: true,
@@ -195,7 +222,8 @@ export async function POST(request: NextRequest) {
       { status: 201 }
     );
   } catch (err) {
-    console.error("maintenance/logs POST unexpected", err);
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+    const { status, message } = maintenanceApiError(err);
+    if (status >= 500) console.error("maintenance/logs POST unexpected", err);
+    return NextResponse.json({ error: message }, { status });
   }
 }

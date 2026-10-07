@@ -1954,6 +1954,10 @@ export async function POST(request: NextRequest) {
             return NextResponse.json({ success: true });
         }
 
+        if (new_status === "dirty") {
+            await maybeActivateLinkedWalkInForRoomDiary(supabase, room_id, date, false);
+        }
+
         const statusPayload =
             new_status === "dirty"
                 ? {

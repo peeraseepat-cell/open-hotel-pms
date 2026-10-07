@@ -1,15 +1,15 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { LaundryBatchStatus } from "@/lib/types";
 import { deleteR2Objects } from "@/lib/r2";
+import { applyLaundryReturnStepAtomic } from "@/lib/linen/atomic-return";
+import { listLaundryReturnPartition } from "@/lib/linen/return-partition";
 import {
-  applyReturnsToSourceBatches,
   listPendingItems,
   rebuildOpenPendingItemsForSourceBatches,
-  resolvePendingItems,
   type PendingResolveInput,
   type ReturnItemInput,
 } from "@/lib/linen/pending-service";
-import { createRewashEvents } from "@/lib/linen/rewash";
+import { replaceLaundryBatchDirtyItemsAtomic } from "@/lib/linen/atomic-dirty-update";
 
 export class LinenBatchError extends Error {
   status: number;
@@ -51,6 +51,7 @@ export type StepInput = {
   vendor_name?: string | null;
   return_items?: ReturnItemInput[];
   pending_resolved?: PendingResolveInput[];
+  rewash_resolved?: Array<{ rewash_event_id: number; resolved_qty: number }>;
 };
 
 const VALID_TRANSITIONS: Record<LaundryBatchStatus, LaundryBatchStatus[]> = {
@@ -352,7 +353,7 @@ export async function getLaundryBatchDetail(supabase: SupabaseClient, batchId: s
   if (batchError) throw new Error(batchError.message);
   if (!batch) throw new LinenBatchError("Batch not found.", 404);
 
-  const [itemsRes, eventsRes, tokensRes, returnSourcesRes, rewashRes, editLogRes, pendingItems] = await Promise.all([
+  const [itemsRes, eventsRes, tokensRes, returnSources, rewashRes, editLogRes, pendingItems] = await Promise.all([
     supabase
       .from("laundry_batch_items")
       .select("*, linen_items(item_number, name_th)")
@@ -360,11 +361,7 @@ export async function getLaundryBatchDetail(supabase: SupabaseClient, batchId: s
       .order("is_dayuse", { ascending: true }),
     supabase.from("laundry_batch_events").select("*").eq("batch_id", batchId).order("created_at", { ascending: true }),
     supabase.from("laundry_vendor_tokens").select("*").eq("batch_id", batchId).order("created_at", { ascending: false }).limit(3),
-    supabase
-      .from("laundry_batch_items")
-      .select("*, linen_items(item_number, name_th), laundry_batches!inner(id, business_date, pickup_round, status)")
-      .neq("batch_id", batchId)
-      .lte("laundry_batches.business_date", (batch as any).business_date),
+    listLaundryReturnPartition(supabase, batchId),
     supabase
       .from("laundry_rewash_events")
       .select("*, linen_items(item_number, name_th)")
@@ -380,7 +377,6 @@ export async function getLaundryBatchDetail(supabase: SupabaseClient, batchId: s
   if (itemsRes.error) throw new Error(itemsRes.error.message);
   if (eventsRes.error) throw new Error(eventsRes.error.message);
   if (tokensRes.error) throw new Error(tokensRes.error.message);
-  if (returnSourcesRes.error) throw new Error(returnSourcesRes.error.message);
   if (rewashRes.error && rewashRes.error.code !== "42P01") throw new Error(rewashRes.error.message);
   if (editLogRes.error && editLogRes.error.code !== "42P01") throw new Error(editLogRes.error.message);
 
@@ -420,30 +416,6 @@ export async function getLaundryBatchDetail(supabase: SupabaseClient, batchId: s
       })
       .filter(Boolean);
   }
-
-  const allReturnSources = (returnSourcesRes.data ?? [])
-    .map((row: any) => {
-      const sentQty = Number(row.sent_by_hotel ?? 0);
-      const receivedQty = Number(row.received_back ?? 0);
-      return {
-        ...row,
-        item_number: row.linen_items?.item_number,
-        name_th: row.linen_items?.name_th,
-        source_batch_id: row.laundry_batches?.id,
-        source_business_date: row.laundry_batches?.business_date,
-        source_pickup_round: row.laundry_batches?.pickup_round,
-        remaining_qty: Math.max(0, sentQty - receivedQty),
-      };
-    })
-    .filter((row: any) => Number(row.sent_by_hotel ?? 0) > 0)
-    .sort((a: any, b: any) => {
-      const dateCompare = String(a.source_business_date).localeCompare(String(b.source_business_date));
-      if (dateCompare !== 0) return dateCompare;
-      return Number(a.source_pickup_round ?? 0) - Number(b.source_pickup_round ?? 0);
-    });
-  const returnSources = String((batch as any).status) === "fo_dirty_counted"
-    ? allReturnSources.filter((row: any) => row.remaining_qty > 0)
-    : allReturnSources;
 
   return {
     batch,
@@ -503,52 +475,24 @@ export async function createLaundryBatch(supabase: SupabaseClient, input: Create
 export async function updateLaundryBatchDirtyItems(
   supabase: SupabaseClient,
   batchId: string,
-  input: { items: CreateBatchItemInput[]; rewashItems?: CreateBatchRewashItemInput[]; createdBy?: string | null }
+  input: {
+    items: CreateBatchItemInput[];
+    rewashItems?: CreateBatchRewashItemInput[];
+    createdBy?: string | null;
+    consumeDayuseAccumulator?: boolean;
+  }
 ) {
   if (!Array.isArray(input.items) || input.items.length === 0) throw new LinenBatchError("items are required.", 400);
 
-  const detail = await getLaundryBatchDetail(supabase, batchId);
-  const currentStatus = String((detail.batch as any).status) as LaundryBatchStatus;
-  if (currentStatus !== "fo_dirty_counted") {
-    throw new LinenBatchError("Batch must be reopened to Step 1 before editing sent linen.", 409);
-  }
-
-  const { error: deleteError } = await supabase
-    .from("laundry_batch_items")
-    .delete()
-    .eq("batch_id", batchId);
-  if (deleteError) throw new Error(deleteError.message);
-
-  const rows = input.items.map((item) => ({
-    batch_id: batchId,
-    linen_item_id: item.linen_item_id,
-    is_dayuse: Boolean(item.is_dayuse),
-    estimated_qty: item.estimated_qty,
-    sent_by_hotel: item.sent_by_hotel,
-  }));
-
-  const { data: items, error: itemsError } = await supabase
-    .from("laundry_batch_items")
-    .insert(rows)
-    .select();
-  if (itemsError) throw new Error(itemsError.message);
-
-  await logEvent(supabase, batchId, "fo_dirty_counted", {
-    actorRole: "fo",
-    data: { item_count: rows.length, edited: true, rewash_item_count: input.rewashItems?.length ?? 0 },
+  await replaceLaundryBatchDirtyItemsAtomic(supabase, {
+    batchId,
+    items: input.items,
+    rewashItems: input.rewashItems,
+    createdBy: input.createdBy,
+    consumeDayuseAccumulator: input.consumeDayuseAccumulator,
   });
 
-  if ((input.rewashItems?.length ?? 0) > 0) {
-    if (!input.createdBy) throw new LinenBatchError("created_by is required for rewash items.", 400);
-    await createRewashEvents(supabase, {
-      batchId,
-      createdBy: input.createdBy,
-      items: input.rewashItems ?? [],
-    });
-  }
-
-  const nextDetail = await getLaundryBatchDetail(supabase, batchId);
-  return { ...nextDetail, items: items ?? nextDetail.items };
+  return getLaundryBatchDetail(supabase, batchId);
 }
 
 export async function deleteLaundryBatch(supabase: SupabaseClient, batchId: string) {
@@ -605,6 +549,26 @@ export async function deleteLaundryBatch(supabase: SupabaseClient, batchId: stri
 }
 
 export async function advanceLaundryBatchStep(supabase: SupabaseClient, batchId: string, input: StepInput) {
+  if (input.step === "fo_return_counted") {
+    const submission: Record<string, unknown> = {
+      return_items: input.return_items ?? [],
+      pending_resolved: input.pending_resolved ?? [],
+      rewash_resolved: input.rewash_resolved ?? [],
+    };
+    if (input.vendor_name !== undefined) submission.vendor_name = input.vendor_name;
+
+    await applyLaundryReturnStepAtomic(
+      supabase,
+      batchId,
+      submission,
+      input.actor_name ?? null,
+      async (entries) => {
+        await deleteR2Objects(entries.map((entry) => entry.key));
+      }
+    );
+    return getLaundryBatchDetail(supabase, batchId);
+  }
+
   const detail = await getLaundryBatchDetail(supabase, batchId);
   const currentStatus = String((detail.batch as any).status) as LaundryBatchStatus;
   const nextStatus = input.step as LaundryBatchStatus;
@@ -612,13 +576,6 @@ export async function advanceLaundryBatchStep(supabase: SupabaseClient, batchId:
 
   const updatePayload: Record<string, unknown> = { status: nextStatus };
   if (input.vendor_name !== undefined) updatePayload.vendor_name = input.vendor_name;
-
-  let eventData: Record<string, unknown> = {};
-  if (input.step === "fo_return_counted") {
-    const returns = await applyReturnsToSourceBatches(supabase, batchId, input.return_items ?? []);
-    const resolved = await resolvePendingItems(supabase, batchId, input.pending_resolved ?? []);
-    eventData = { returns, resolved };
-  }
 
   const { data: batch, error } = await supabase
     .from("laundry_batches")
@@ -631,7 +588,7 @@ export async function advanceLaundryBatchStep(supabase: SupabaseClient, batchId:
   await logEvent(supabase, batchId, input.step, {
     actorName: input.actor_name ?? null,
     actorRole: input.step === "vendor_signed" ? "vendor" : "fo",
-    data: eventData,
+    data: {},
   });
 
   return getLaundryBatchDetail(supabase, String((batch as any).id));

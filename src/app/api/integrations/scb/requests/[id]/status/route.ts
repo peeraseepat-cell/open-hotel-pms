@@ -5,6 +5,7 @@ import { reconcileScbRequestStatuses } from "@/lib/scb/inquiry-runner";
 import { serializeScbRequest } from "@/lib/scb/presenters";
 
 export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
 
 export async function GET(request: NextRequest, { params }: { params: { id: string } }) {
   try {

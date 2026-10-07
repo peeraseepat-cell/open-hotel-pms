@@ -18,7 +18,7 @@ export function deriveBookingGroupStatus(
     return current === "completed" ? "completed" : "active";
   }
 
-  return "completed";
+  return reservationStatuses.some((status) => normalizeStatus(status) === "checked_out") ? "completed" : "active";
 }
 
 export async function syncBookingGroupStatusById(

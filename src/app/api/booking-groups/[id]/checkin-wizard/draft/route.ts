@@ -28,6 +28,9 @@ export async function PUT(
     const businessDate = pickBusinessDate(body?.business_date, fallbackBusinessDate);
 
     const currentDraft = await getWizardDraft(supabase, groupId, businessDate);
+    if (currentDraft && String(body?.draft_revision ?? "") !== String(currentDraft.updated_at ?? "")) {
+      return NextResponse.json({ success: false, error: "This draft changed in another tab. Reload and try again.", code: "DRAFT_REVISION_CONFLICT" }, { status: 409 });
+    }
     const patchDraftJson =
       body?.draft_json && typeof body.draft_json === "object"
         ? (body.draft_json as Record<string, unknown>)
@@ -51,10 +54,12 @@ export async function PUT(
       currentStep,
       draftJson: mergedDraftJson,
       touchCommittedAt: true,
+      expectedRevision: currentDraft ? String(currentDraft.updated_at ?? "") : undefined,
     });
 
     return NextResponse.json({ success: true, draft });
   } catch (err) {
+    if ((err as { code?: string })?.code === "DRAFT_REVISION_CONFLICT") return NextResponse.json({ success: false, error: "This draft changed in another tab. Reload and try again.", code: "DRAFT_REVISION_CONFLICT" }, { status: 409 });
     return NextResponse.json(
       { success: false, error: err instanceof Error ? err.message : "Internal server error" },
       { status: 500 }

@@ -15,6 +15,10 @@ interface ReturnItem {
     name_th?: string;
     remaining_qty: number;
     is_dayuse: boolean;
+    // laneless. Required on purpose. Deployed out of order this fails loudly, instead of
+    // quietly mis-laning every row into the collapsed accordion — which is the defect we are
+    // fixing, wearing a different hat. Order is: migration ceremony first, app deploy second.
+    lane: "recent" | "overdue";
 }
 
 interface MobileBatchStepReturnProps {
@@ -51,13 +55,12 @@ export function MobileBatchStepReturn({ batchId, returnSources, initialReturnQty
             if (dateCompare !== 0) return dateCompare;
             return Number(b.source_pickup_round) - Number(a.source_pickup_round);
         });
-        const latest = sorted[0];
-        const latestSources = latest
-            ? sorted.filter((item) => item.source_business_date === latest.source_business_date && item.source_pickup_round === latest.source_pickup_round)
-            : [];
-        const olderSources = latest
-            ? sorted.filter((item) => item.source_business_date !== latest.source_business_date || item.source_pickup_round !== latest.source_pickup_round)
-            : [];
+        // A1: consume the server's lane instead of re-deriving it. RULING 1 defines `recent` as
+        // the newest (date, round) pair among the rows the server actually emits, current batch
+        // excluded — a transcription of the derivation this replaces, so nothing staff-visible
+        // moves. One definition, on the server. The sort stays: it sets display order, not lanes.
+        const latestSources = sorted.filter((item) => item.lane === "recent");
+        const olderSources = sorted.filter((item) => item.lane !== "recent");
         const olderGroups = olderSources.reduce<Record<string, ReturnItem[]>>((acc, item) => {
             const key = `${item.source_business_date} รอบ ${item.source_pickup_round}`;
             acc[key] = acc[key] || [];
@@ -89,33 +92,6 @@ export function MobileBatchStepReturn({ batchId, returnSources, initialReturnQty
         })
         .filter((item) => item.qty > 0);
 
-    const resolveTypedRewashReturns = async () => {
-        const rewashReturns = getPendingRewashReturns();
-        if (rewashReturns.length === 0) return;
-
-        await Promise.all(rewashReturns.map(async (item) => {
-            const res = await fetch(`/api/linen/rewash/${item.id}/resolve`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    resolved_in_batch_id: batchId,
-                    resolved_qty: item.qty,
-                }),
-            });
-            const result = await res.json().catch(() => null);
-            if (!res.ok || result?.success === false) {
-                throw new Error(result?.error || "Failed to resolve rewash");
-            }
-        }));
-
-        setRewashQtys((prev) => {
-            const next = { ...prev };
-            for (const item of rewashReturns) delete next[item.id];
-            return next;
-        });
-        await mutateRewash();
-    };
-
     const renderReturnRows = (sources: ReturnItem[]) => (
         <div className="divide-y divide-slate-100">
             {sources.map((source) => {
@@ -138,7 +114,14 @@ export function MobileBatchStepReturn({ batchId, returnSources, initialReturnQty
     const handleSubmit = async () => {
         setIsSubmitting(true);
         try {
-            await resolveTypedRewashReturns();
+            // A2: rewash resolution rides inside the one step request instead of firing N
+            // pre-step POSTs. One press = one commit; a failed submit now writes nothing, where
+            // before it could leave rewash resolved with the batch not advanced. Sending both
+            // would make the RPC reject the row as no longer pending, so the old calls are gone.
+            const rewashResolved = getPendingRewashReturns().map((item) => ({
+                rewash_event_id: Number(item.id),
+                resolved_qty: item.qty,
+            }));
 
             const items = returnSources.map(s => {
                 const key = `${s.source_batch_id}_${s.linen_item_id}_${s.is_dayuse}`;
@@ -156,11 +139,17 @@ export function MobileBatchStepReturn({ batchId, returnSources, initialReturnQty
                 body: JSON.stringify({
                     step: "fo_return_counted",
                     return_items: items,
+                    ...(rewashResolved.length > 0 ? { rewash_resolved: rewashResolved } : {}),
                 }),
             });
 
             const result = await res.json().catch(() => null);
             if (!res.ok) throw new Error(result?.error || "Failed to submit returns");
+
+            if (rewashResolved.length > 0) {
+                setRewashQtys({});
+                await mutateRewash();
+            }
             const latestKeys = new Set(
                 latestSources.map((source) => `${source.source_batch_id}_${source.linen_item_id}_${source.is_dayuse}`)
             );

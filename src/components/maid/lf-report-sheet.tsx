@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Camera, Info, Loader2, Search, X } from "lucide-react";
 import { compressImageForUpload } from "@/lib/client-image-compression";
+import { LF_DRAFT_KEY, parseLfDraft, serializeLfDraft } from "./lf-report-draft";
 
 interface ReportRoom {
   id: string;
@@ -15,6 +16,7 @@ interface LfReportSheetProps {
   isOpen: boolean;
   onClose: () => void;
   onSuccess: () => void;
+  onReopen?: () => void;
 }
 
 const CATEGORY_LABELS: Record<string, string> = {
@@ -26,7 +28,7 @@ const CATEGORY_LABELS: Record<string, string> = {
   other: "อื่นๆ",
 };
 
-export default function LfReportSheet({ isOpen, onClose, onSuccess }: LfReportSheetProps) {
+export default function LfReportSheet({ isOpen, onClose, onSuccess, onReopen }: LfReportSheetProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -59,6 +61,28 @@ export default function LfReportSheet({ isOpen, onClose, onSuccess }: LfReportSh
     };
   }, [photoPreview]);
 
+  useEffect(() => {
+    try {
+      const draft = parseLfDraft(window.localStorage.getItem(LF_DRAFT_KEY), Date.now());
+      if (!draft) return;
+      setRoomId(draft.roomId);
+      setDescription(draft.description);
+      setLocationDetail(draft.locationDetail);
+      setCategory(draft.category);
+      onReopen?.();
+    } catch { /* Storage can be unavailable in a private browsing context. */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    try {
+      window.localStorage.setItem(LF_DRAFT_KEY, serializeLfDraft({
+        roomId, description, locationDetail, category, createdItemId: null, photoPromised: false,
+      }, Date.now()));
+    } catch { /* The form remains usable if persistent storage is unavailable. */ }
+  }, [isOpen, roomId, description, locationDetail, category]);
+
   const resetState = () => {
     setRoomId("");
     setDescription("");
@@ -72,6 +96,7 @@ export default function LfReportSheet({ isOpen, onClose, onSuccess }: LfReportSh
   };
 
   const handleClose = () => {
+    try { window.localStorage.removeItem(LF_DRAFT_KEY); } catch { /* Storage unavailable. */ }
     resetState();
     onClose();
   };

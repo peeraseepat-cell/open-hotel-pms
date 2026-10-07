@@ -1,5 +1,6 @@
 import { createServerSupabaseClient } from "@/lib/supabase/server";
-import { assertAdminOrSupervisor, getAuthenticatedUser } from "@/lib/server-auth";
+import { requireStaffAuth } from "@/lib/server-auth";
+import type { UserRole } from "@/lib/types";
 import { randomUUID } from "crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
@@ -21,19 +22,6 @@ const bodySchema = z.object({
 function roleToDepartmentCode(role: "admin" | "frontdesk" | "maid" | "supervisor" | "mobile" | "owner") {
   if (role === "maid") return "HK";
   return "FO";
-}
-
-async function hasAnyElevatedProfiles(
-  supabase: ReturnType<typeof createServerSupabaseClient>
-): Promise<boolean> {
-  const { data, error } = await supabase
-    .from("profiles")
-    .select("user_id")
-    .in("role", ["admin", "supervisor"])
-    .limit(1);
-
-  if (error) throw new Error(error.message);
-  return (data?.length ?? 0) > 0;
 }
 
 function toEmployeeCode(userId: string): string {
@@ -65,22 +53,12 @@ async function findAuthUserByEmail(
 export async function POST(request: NextRequest) {
   try {
     const supabase = createServerSupabaseClient();
-    const user = await getAuthenticatedUser(supabase, request);
-
-    // Keep legacy-compatible behavior: if elevated profiles exist, enforce role check.
-    // In fresh/migrated databases that only have "staff" profiles, keep invite usable.
-    if (user) {
-      try {
-        const elevatedProfilesExist = await hasAnyElevatedProfiles(supabase);
-        if (elevatedProfilesExist) {
-          await assertAdminOrSupervisor(supabase, user.id);
-        }
-      } catch (guardError) {
-        const message = guardError instanceof Error ? guardError.message : "Forbidden";
-        const status = message === "Forbidden" ? 403 : 500;
-        return NextResponse.json({ success: false, error: message }, { status });
-      }
-    }
+    // Staff invite is a management action: admin or supervisor only.
+    // A supervisor may only invite operational staff; assigning an elevated role
+    // (admin/supervisor/owner) requires admin (enforced below). The first admin on a
+    // fresh deployment is seeded out-of-band (Supabase), not via this open route.
+    const auth = await requireStaffAuth(supabase, request, { allowRoles: ["admin", "supervisor"] });
+    if (auth.error) return auth.error;
 
     const json = await request.json().catch(() => null);
     const parsed = bodySchema.safeParse(json);
@@ -92,6 +70,17 @@ export async function POST(request: NextRequest) {
     }
 
     const payload = parsed.data;
+
+    // Privilege-escalation guard: only an admin may grant an elevated role.
+    // (Without this, a supervisor — who passes the gate above — could mint admin/owner.)
+    const ELEVATED_ROLES: readonly UserRole[] = ["admin", "supervisor", "owner"];
+    if (ELEVATED_ROLES.includes(payload.role) && auth.role !== "admin") {
+      return NextResponse.json(
+        { success: false, error: "Only an admin can assign an elevated role." },
+        { status: 403 }
+      );
+    }
+
     const email = payload.email.trim().toLowerCase();
     const displayName = payload.display_name.trim();
     const departmentCode = payload.department_code ?? roleToDepartmentCode(payload.role);

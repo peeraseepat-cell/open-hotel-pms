@@ -1,7 +1,6 @@
 import {
   getNightAuditSettings,
   normalizePendingGroupCheckinWizardDrafts,
-  toBangkokWindow,
 } from "@/lib/night-audit";
 import { collectSameRoomLinkedContinuationReservationIds } from "@/lib/linked-stay-continuity";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
@@ -18,7 +17,6 @@ export async function GET() {
     const supabase = createServerSupabaseClient();
     const settings = await getNightAuditSettings(supabase);
     const businessDate = settings.businessDate;
-    const { from, to } = toBangkokWindow(businessDate);
 
     const [
       noShowPendingRes,
@@ -95,8 +93,7 @@ export async function GET() {
         .select("id", { count: "exact", head: true })
         .eq("action", "no_show")
         .eq("entity_type", "reservation")
-        .gte("created_at", from)
-        .lt("created_at", to),
+        .eq("business_date", businessDate),
     ]);
 
     if (noShowPendingRes.error) return NextResponse.json({ success: false, error: noShowPendingRes.error.message }, { status: 500 });
@@ -150,6 +147,18 @@ export async function GET() {
 
     const openHkTasks = openHkRoomIds.size;
 
+    const { count: activeDayUseCount, error: activeDayUseError } = await supabase
+      .from("reservations")
+      .select("id", { count: "exact", head: true })
+      .eq("is_dayuse", true)
+      .eq("status", "active")
+      .eq("checkin_date", businessDate)
+      .eq("checkout_date", businessDate);
+    if (activeDayUseError) {
+      return NextResponse.json({ success: false, error: activeDayUseError.message }, { status: 500 });
+    }
+    const activeDayUse = activeDayUseCount ?? 0;
+
     const blockers: PreCheckItem[] = [];
     if (noShowPending > 0) {
       blockers.push({
@@ -164,6 +173,14 @@ export async function GET() {
         type: "group_checkin_wizard_draft_pending",
         count: pendingWizardDrafts,
         message: `${pendingWizardDrafts} group check-in wizard draft(s) still open`,
+      });
+    }
+
+    if (activeDayUse > 0) {
+      blockers.push({
+        type: "active_dayuse",
+        count: activeDayUse,
+        message: `${activeDayUse} active day use session(s) must be checked out first`,
       });
     }
 

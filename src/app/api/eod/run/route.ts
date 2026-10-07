@@ -319,8 +319,7 @@ export async function POST(request: NextRequest) {
             .select("id, after_json")
             .eq("action", "no_show")
             .eq("entity_type", "reservation")
-            .gte("created_at", `${businessDate}T00:00:00+07:00`)
-            .lt("created_at", `${businessDate}T24:00:00+07:00`);
+            .eq("business_date", businessDate);
 
         if (noShowLogsErr) return NextResponse.json({ error: noShowLogsErr.message }, { status: 500 });
 

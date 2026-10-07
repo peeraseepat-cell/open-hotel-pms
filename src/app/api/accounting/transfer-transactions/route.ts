@@ -191,7 +191,7 @@ export async function POST(request: NextRequest) {
     const sellingPrice = transfer.selling_price === null ? null : Number(transfer.selling_price);
     const costPrice = transfer.cost_price === null ? null : Number(transfer.cost_price);
     const margin =
-      sellingPrice === null || costPrice === null ? null : Number((sellingPrice - costPrice).toFixed(2));
+      sellingPrice === null ? null : costPrice === null ? 0 : Number((sellingPrice - costPrice).toFixed(2));
 
     const { data: inserted, error: insertError } = await supabase
       .from("transfer_transactions")

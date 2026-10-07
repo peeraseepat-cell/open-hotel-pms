@@ -1,3 +1,4 @@
+import { computeTransferPool } from "@/lib/transfer-pool";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
@@ -282,15 +283,8 @@ async function fallbackCreateTransfer(
 
   const paymentStatus = payload.payment_method ? "paid_to_hotel" : "unpaid";
   const status = payload.driver_id ? "driver_assigned" : "pending";
-  const netCommission = Number(
-    (
-      (selling ?? 0) -
-      (cost ?? 0) -
-      (driverFee ?? 0) +
-      (driverCom ?? 0)
-    ).toFixed(2)
-  );
-  const margin = selling !== null && cost !== null ? Number(((selling ?? 0) - (cost ?? 0)).toFixed(2)) : null;
+  const netCommission = computeTransferPool({ sellingPrice: selling, costPrice: cost, driverFee });
+  const margin = selling !== null ? (cost === null ? 0 : Number((selling - cost).toFixed(2))) : null;
 
   const { data: transfer, error: transferError } = await supabase
     .from("transfers")
@@ -423,9 +417,9 @@ async function fallbackCreateTransfer(
       guest_profile_id: reservation.guest_profile_id ?? null,
       staff_name: payload.created_by ?? "N/A",
       rule_type: "pct_sell",
-      rule_value: selling > 0 ? Number(((driverCom / selling) * 100).toFixed(2)) : 0,
+      rule_value: selling > 0 ? Number(((netCommission / selling) * 100).toFixed(2)) : 0,
       base_amount: selling,
-      commission_amount: driverCom,
+      commission_amount: netCommission,
       status: "pending",
       payout_cycle: "monthly",
     });

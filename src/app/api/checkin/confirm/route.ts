@@ -36,6 +36,8 @@ const guestInfoSchema = z.object({
 });
 
 const accompanyingSchema = z.object({
+  passport_guest_index: z.number().int().min(1).max(3).nullable().optional(),
+  passport_scan_id: z.string().uuid().nullable().optional(),
   full_name: z.string().default(""),
   passport_no: z.string().optional().nullable(),
   nationality: z.string().optional().nullable(),

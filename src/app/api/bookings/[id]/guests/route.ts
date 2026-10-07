@@ -251,22 +251,19 @@ export async function DELETE(request: NextRequest, { params }: { params: { id: s
     }
 
     const supabase = createServerSupabaseClient();
-    const { data: deleted, error } = await supabase
-      .from("reservation_guests")
-      .delete()
-      .eq("reservation_id", parsedParams.data.id)
-      .eq("guest_profile_id", parsedQuery.data.guest_profile_id)
-      .eq("role", "accompanying")
-      .select("id");
+    const { data: removal, error } = await supabase.rpc("remove_accompanying_guest", {
+      p_reservation_id: parsedParams.data.id,
+      p_guest_profile_id: parsedQuery.data.guest_profile_id,
+    });
 
     if (error) {
       return NextResponse.json({ success: false, error: error.message }, { status: 500 });
     }
-    if (!deleted || deleted.length === 0) {
+    if (!removal || Number(removal.removed) === 0) {
       return NextResponse.json({ success: false, error: "Accompanying guest link not found." }, { status: 404 });
     }
 
-    return NextResponse.json({ success: true, removed: deleted.length });
+    return NextResponse.json({ success: true, removed: Number(removal.removed) });
   } catch (err) {
     console.error("api/bookings/[id]/guests DELETE failed", err);
     const message = err instanceof Error ? err.message : "Internal server error";

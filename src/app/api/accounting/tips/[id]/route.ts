@@ -1,4 +1,5 @@
 import { createServerSupabaseClient } from "@/lib/supabase/server";
+import { requireStaffAuth } from "@/lib/server-auth";
 import { normalizeAuditSource } from "@/lib/audit-utils";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
@@ -69,6 +70,9 @@ export async function PATCH(request: NextRequest, { params }: { params: { id: st
     }
 
     const supabase = createServerSupabaseClient();
+    const auth = await requireStaffAuth(supabase, request, { allowRoles: ["admin", "supervisor", "frontdesk"] });
+    if (auth.error) return auth.error;
+
     const { data: current, error: currentError } = await supabase
       .from("tip_ledger")
       .select("*")

@@ -1,4 +1,5 @@
 import { createServerSupabaseClient } from "@/lib/supabase/server";
+import { buildQuotedIlikeOrFilter } from "@/lib/postgrest-escape";
 import { assertAdminOrSupervisor, getAuthenticatedUser } from "@/lib/server-auth";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
@@ -70,7 +71,7 @@ export async function GET(request: NextRequest) {
     if (for_sale === "true") query = query.not("sale_price", "is", null);
     if (for_sale === "false") query = query.is("sale_price", null);
     if (q && q.length > 0) {
-      query = query.or(`name.ilike.%${q}%,sku.ilike.%${q}%`);
+      query = query.or(buildQuotedIlikeOrFilter(["name", "sku"], q));
     }
 
     const initial = await query;
@@ -94,7 +95,7 @@ export async function GET(request: NextRequest) {
           {
             success: false,
             error:
-              "DB migration required: apply 202603290002_inventory_display_order.sql before using products API.",
+              "DB migration required: apply 20260329000299_inventory_display_order.sql before using products API.",
           },
           { status: 500 }
         );
@@ -104,7 +105,7 @@ export async function GET(request: NextRequest) {
           {
             success: false,
             error:
-              "DB migration required: apply 202604150001_phase65_stock_snapshot_amenity_audit.sql before using product tracking modes.",
+              "DB migration required: apply 20260415000199_phase65_stock_snapshot_amenity_audit.sql before using product tracking modes.",
           },
           { status: 500 }
         );
@@ -193,7 +194,7 @@ export async function POST(request: NextRequest) {
             {
               success: false,
               error:
-                "DB migration required: apply 202603290002_inventory_display_order.sql before creating products.",
+                "DB migration required: apply 20260329000299_inventory_display_order.sql before creating products.",
             },
             { status: 500 }
           );
@@ -245,7 +246,7 @@ export async function POST(request: NextRequest) {
           {
             success: false,
             error:
-              "DB migration required: apply 202603290002_inventory_display_order.sql before creating products.",
+              "DB migration required: apply 20260329000299_inventory_display_order.sql before creating products.",
           },
           { status: 500 }
         );
@@ -255,7 +256,7 @@ export async function POST(request: NextRequest) {
           {
             success: false,
             error:
-              "DB migration required: apply 202604150001_phase65_stock_snapshot_amenity_audit.sql before creating product tracking modes.",
+              "DB migration required: apply 20260415000199_phase65_stock_snapshot_amenity_audit.sql before creating product tracking modes.",
           },
           { status: 500 }
         );

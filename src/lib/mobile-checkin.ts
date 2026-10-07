@@ -42,6 +42,8 @@ export type MobileAccompanyingInput = {
   date_of_birth?: string | null;
   gender?: string | null;
   source?: "ocr" | "manual" | null;
+  passport_scan_id?: string | null;
+  passport_guest_index?: number | null;
 };
 
 type GuestProfileConflictContextBase = Omit<
@@ -609,23 +611,12 @@ export async function syncAccompanyingGuests(params: {
     .filter((guest) => guest.full_name)
     .slice(0, 3);
 
-  const { error: deleteError } = await supabase
-    .from("reservation_guests")
-    .delete()
-    .eq("reservation_id", reservationId)
-    .eq("role", "accompanying");
-
-  if (deleteError) {
-    throw new MobileCheckinError(deleteError.message, 500, "ACCOMPANY_DELETE_FAILED");
-  }
-
-  if (cleaned.length === 0) return;
-
   const rows: Array<{
     reservation_id: string;
     guest_profile_id: string;
     role: "accompanying";
     display_order: number;
+    passport_scan_id?: string | null;
   }> = [];
 
   for (let idx = 0; idx < cleaned.length; idx += 1) {
@@ -694,19 +685,17 @@ export async function syncAccompanyingGuests(params: {
       reservation_id: reservationId,
       guest_profile_id: resolvedProfileId,
       role: "accompanying",
-      display_order: idx + 2,
+      display_order: guest.passport_guest_index != null ? guest.passport_guest_index + 1 : idx + 2,
+      passport_scan_id: guest.passport_scan_id ?? null,
     });
   }
 
-  if (rows.length === 0) return;
+  const { error } = await supabase.rpc("sync_accompanying_party", {
+    p_reservation_id: reservationId,
+    p_guests: rows,
+  });
+  if (error) throw new MobileCheckinError(error.message, 500, "ACCOMPANY_SYNC_FAILED");
 
-  const { error: insertError } = await supabase
-    .from("reservation_guests")
-    .insert(rows);
-
-  if (insertError) {
-    throw new MobileCheckinError(insertError.message, 500, "ACCOMPANY_INSERT_FAILED");
-  }
 }
 
 export function computeMrzConfidence(parsed: any): number {

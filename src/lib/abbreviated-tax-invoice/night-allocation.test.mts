@@ -86,6 +86,35 @@ assert.equal(
   "charged cancelled early-checkout night should still be restored"
 );
 
+const fullyCancelledRoomMoveNights = completeChargedReservationNightsFromAuditTotal(
+  {
+    checkin_date: "2026-06-28",
+    checkout_date: "2026-06-29",
+  },
+  [
+    {
+      id: "room-238-moved",
+      stay_date: "2026-06-28",
+      nightly_price: 520,
+      cancelled_at: "2026-06-28T11:36:36.108+00:00",
+    },
+    {
+      id: "room-320-checked-out",
+      stay_date: "2026-06-28",
+      nightly_price: 520,
+      cancelled_at: "2026-06-28T22:33:41.443+00:00",
+    },
+  ],
+  520,
+  0
+);
+
+assert.deepEqual(
+  fullyCancelledRoomMoveNights.map((night) => night.id),
+  ["room-320-checked-out"],
+  "fully cancelled room moves should restore the latest exact charged candidate"
+);
+
 assert.deepEqual(
   distributeAuditTotalAcrossNights(4820, [
     { stay_date: "2026-05-10", nightly_price: 1590, cancelled_at: null },
