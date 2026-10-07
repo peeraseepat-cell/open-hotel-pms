@@ -132,7 +132,7 @@ export async function GET(request: NextRequest) {
           {
             success: false,
             error:
-              "DB migration required: apply 202603290002_inventory_display_order.sql before using stock main API.",
+              "DB migration required: apply 20260329000299_inventory_display_order.sql before using stock main API.",
           },
           { status: 500 }
         );

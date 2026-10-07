@@ -10,7 +10,7 @@ import fs from "node:fs";
 // Source-level contract in house style (no local PG harness in this repo); the
 // privilege proof both directions is the PR's ceremony read-back.
 const migration = fs.readFileSync(
-  new URL("../../../supabase/migrations/202607160001_secure_maintenance_anon.sql", import.meta.url),
+  new URL("../../../supabase/migrations/20260716000199_secure_maintenance_anon.sql", import.meta.url),
   "utf8"
 );
 

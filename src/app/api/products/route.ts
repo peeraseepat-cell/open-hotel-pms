@@ -95,7 +95,7 @@ export async function GET(request: NextRequest) {
           {
             success: false,
             error:
-              "DB migration required: apply 202603290002_inventory_display_order.sql before using products API.",
+              "DB migration required: apply 20260329000299_inventory_display_order.sql before using products API.",
           },
           { status: 500 }
         );
@@ -105,7 +105,7 @@ export async function GET(request: NextRequest) {
           {
             success: false,
             error:
-              "DB migration required: apply 202604150001_phase65_stock_snapshot_amenity_audit.sql before using product tracking modes.",
+              "DB migration required: apply 20260415000199_phase65_stock_snapshot_amenity_audit.sql before using product tracking modes.",
           },
           { status: 500 }
         );
@@ -194,7 +194,7 @@ export async function POST(request: NextRequest) {
             {
               success: false,
               error:
-                "DB migration required: apply 202603290002_inventory_display_order.sql before creating products.",
+                "DB migration required: apply 20260329000299_inventory_display_order.sql before creating products.",
             },
             { status: 500 }
           );
@@ -246,7 +246,7 @@ export async function POST(request: NextRequest) {
           {
             success: false,
             error:
-              "DB migration required: apply 202603290002_inventory_display_order.sql before creating products.",
+              "DB migration required: apply 20260329000299_inventory_display_order.sql before creating products.",
           },
           { status: 500 }
         );
@@ -256,7 +256,7 @@ export async function POST(request: NextRequest) {
           {
             success: false,
             error:
-              "DB migration required: apply 202604150001_phase65_stock_snapshot_amenity_audit.sql before creating product tracking modes.",
+              "DB migration required: apply 20260415000199_phase65_stock_snapshot_amenity_audit.sql before creating product tracking modes.",
           },
           { status: 500 }
         );

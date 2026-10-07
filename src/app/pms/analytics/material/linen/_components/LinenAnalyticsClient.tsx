@@ -141,7 +141,7 @@ export default function LinenAnalyticsClient() {
                     <p className="a-secondary mt-1">{error}</p>
                     {needsMigrationHint && (
                         <p className="a-muted text-[11px] mt-2">
-                            If this says the RPC function does not exist, apply migration 202604180001_phase68_1_linen_analytics.sql.
+                            If this says the RPC function does not exist, apply migration 20260418000199_phase68_1_linen_analytics.sql.
                         </p>
                     )}
                 </div>
