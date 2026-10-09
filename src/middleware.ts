@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { createClient } from "@supabase/supabase-js";
 import { createMiddlewareSupabaseClient } from "@/lib/supabase/middleware";
 import {
   clearPermissionCache,
@@ -142,12 +143,31 @@ export async function middleware(request: NextRequest) {
       );
     }
 
-    const { data: profile } = await supabase
+    // getUser(token) validates identity but does not attach that token to
+    // subsequent PostgREST reads. Read the role with the same user's RLS context.
+    const profileClient = bearerToken
+      ? createClient(
+          process.env.NEXT_PUBLIC_SUPABASE_URL!,
+          process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+          {
+            global: { headers: { Authorization: `Bearer ${bearerToken}` } },
+            auth: { autoRefreshToken: false, persistSession: false },
+          }
+        )
+      : supabase;
+    const { data: profile, error: profileError } = await profileClient
       .from("profiles")
       .select("role")
       .eq("user_id", user.id)
       .maybeSingle();
     const role = String(profile?.role ?? "").trim().toLowerCase();
+
+    if (profileError || !role) {
+      return NextResponse.json(
+        { success: false, error: "Forbidden" },
+        { status: 403 }
+      );
+    }
 
     if (role === "owner") {
       return NextResponse.json(
