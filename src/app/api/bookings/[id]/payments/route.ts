@@ -296,6 +296,10 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
 
 export async function POST(request: NextRequest, { params }: RouteParams) {
     try {
+        const supabase = createServerSupabaseClient();
+        const auth = await requireStaffAuth(supabase, request);
+        if (auth.error) return auth.error;
+
         const requestedReservationId = params.id;
         if (!requestedReservationId) {
             return NextResponse.json({ error: "Missing reservation id." }, { status: 400 });
@@ -342,7 +346,6 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
             return NextResponse.json({ error: "Transfer deposit split is only allowed for normal transfer payments." }, { status: 400 });
         }
 
-        const supabase = createServerSupabaseClient();
         let effectiveReservationId = requestedReservationId;
         let reservation: ReservationPaymentTarget | null = null;
 
@@ -406,9 +409,6 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
             if (!parsedTransfer.ok) {
                 return NextResponse.json({ error: parsedTransfer.error }, { status: 400 });
             }
-
-            const auth = await requireStaffAuth(supabase, request, { denyRoles: [] });
-            if (auth.error) return auth.error;
 
             const exactDepositSplit = transferDepositSplitAmount !== null
                 ? getExactTransferDepositSplit({
